@@ -1177,6 +1177,63 @@ class TestGetSessionSummary:
         assert len(summary) <= 100
         assert summary.endswith("...")
 
+    def test_extracts_summary_from_slash_command_args(self, tmp_path):
+        """Slash-command user messages must yield a useful summary.
+
+        Regression: Claude Code records user-typed slash commands as
+        <command-message>X</command-message><command-name>/X</command-name>
+        <command-args>...prompt body...</command-args>. The previous
+        `not text.startswith("<")` filter dropped the entire message and
+        returned "(no summary)", which made `all`/`local` silently skip the
+        session.
+        """
+        jsonl_file = tmp_path / "slash.jsonl"
+        jsonl_file.write_text(
+            '{"type":"user","timestamp":"2026-05-27T14:49:26Z","message":'
+            '{"role":"user","content":'
+            '"<command-message>morningly</command-message>\\n'
+            "<command-name>/morningly</command-name>\\n"
+            '<command-args>Loving Father, please direct my thinking.</command-args>"'
+            "}}\n",
+            encoding="utf-8",
+        )
+        summary = get_session_summary(jsonl_file)
+        assert summary != "(no summary)"
+        assert "Loving Father" in summary
+
+    def test_uses_command_name_when_args_empty(self, tmp_path):
+        """Slash command without args falls back to the command name itself."""
+        jsonl_file = tmp_path / "no_args.jsonl"
+        jsonl_file.write_text(
+            '{"type":"user","timestamp":"2026-05-27T14:49:26Z","message":'
+            '{"role":"user","content":'
+            '"<command-message>clear</command-message>\\n'
+            "<command-name>/clear</command-name>\\n"
+            '<command-args></command-args>"'
+            "}}\n",
+            encoding="utf-8",
+        )
+        summary = get_session_summary(jsonl_file)
+        assert summary != "(no summary)"
+        assert "/clear" in summary
+
+    def test_still_skips_non_command_angle_bracket_messages(self, tmp_path):
+        """Non-command messages that start with `<` (e.g. <system-reminder>) still skip.
+
+        We narrowed the filter to only extract from slash-command wrappers; other
+        XML-ish content should fall through to the next user message as before.
+        """
+        jsonl_file = tmp_path / "mixed.jsonl"
+        jsonl_file.write_text(
+            '{"type":"user","timestamp":"2026-05-27T14:49:26Z","message":'
+            '{"role":"user","content":"<system-reminder>boilerplate</system-reminder>"}}\n'
+            '{"type":"user","timestamp":"2026-05-27T14:49:27Z","message":'
+            '{"role":"user","content":"actual user prompt"}}\n',
+            encoding="utf-8",
+        )
+        summary = get_session_summary(jsonl_file)
+        assert summary == "actual user prompt"
+
 
 class TestFindLocalSessions:
     """Tests for find_local_sessions which discovers local JSONL files."""

@@ -75,6 +75,33 @@ def extract_text_from_content(content):
     return ""
 
 
+_COMMAND_NAME_RE = re.compile(r"<command-name>([^<]*)</command-name>")
+_COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
+
+
+def extract_command_summary(text):
+    """Return a readable summary for slash-command user messages, else None.
+
+    Claude Code records user-typed slash commands as text content shaped like:
+        <command-message>morningly</command-message>
+        <command-name>/morningly</command-name>
+        <command-args>...actual prompt body...</command-args>
+    The leading `<` would otherwise cause callers to skip the message and
+    treat the session as having no summary — silently dropping it from
+    `all`/`local` listings. Prefer the args (the real prompt); fall back to
+    just the command name when the slash command was run with no args.
+    """
+    if "<command-name>" not in text and "<command-message>" not in text:
+        return None
+    name_match = _COMMAND_NAME_RE.search(text)
+    args_match = _COMMAND_ARGS_RE.search(text)
+    args_text = args_match.group(1).strip() if args_match else ""
+    name_text = name_match.group(1).strip() if name_match else ""
+    if args_text and name_text:
+        return f"{name_text}: {args_text}"
+    return args_text or name_text or None
+
+
 # Module-level variable for GitHub repo (set by generate_html)
 _github_repo = None
 
@@ -146,10 +173,16 @@ def _get_jsonl_summary(filepath, max_length=200):
                     ):
                         content = obj["message"]["content"]
                         text = extract_text_from_content(content)
-                        if text and not text.startswith("<"):
-                            if len(text) > max_length:
-                                return text[: max_length - 3] + "..."
-                            return text
+                        if not text:
+                            continue
+                        if text.startswith("<"):
+                            cmd_summary = extract_command_summary(text)
+                            if not cmd_summary:
+                                continue
+                            text = cmd_summary
+                        if len(text) > max_length:
+                            return text[: max_length - 3] + "..."
+                        return text
                 except json.JSONDecodeError:
                     continue
     except Exception:

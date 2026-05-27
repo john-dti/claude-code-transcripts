@@ -163,6 +163,33 @@ class TestFindAllSessions:
             assert "summary" in session
             assert session["summary"] != "(no summary)"
 
+    def test_includes_slash_command_only_sessions(self, tmp_path):
+        """Sessions whose first user message is a slash command must not be dropped.
+
+        Regression: `all --open` silently skipped sessions like
+        `~/.claude/projects/d--jdmonty-spearhead/4bc03b78-...jsonl` because
+        their first user content is `<command-message>...<command-args>...`,
+        which fell through the `not text.startswith("<")` filter into
+        '(no summary)', which find_all_sessions then discards.
+        """
+        project_dir = tmp_path / "-jdmonty-spearhead"
+        project_dir.mkdir()
+        (project_dir / "abc.jsonl").write_text(
+            '{"type":"user","timestamp":"2026-05-27T14:49:26Z","message":'
+            '{"role":"user","content":'
+            '"<command-message>morningly</command-message>\\n'
+            "<command-name>/morningly</command-name>\\n"
+            '<command-args>actual prompt text here</command-args>"'
+            "}}\n",
+            encoding="utf-8",
+        )
+
+        result = find_all_sessions(tmp_path)
+
+        assert len(result) == 1
+        assert len(result[0]["sessions"]) == 1
+        assert "actual prompt text here" in result[0]["sessions"][0]["summary"]
+
 
 class TestGenerateBatchHtml:
     """Tests for generate_batch_html function."""
