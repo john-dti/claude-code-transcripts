@@ -18,6 +18,8 @@ from claude_code_transcripts import (
     render_edit_tool,
     render_bash_tool,
     render_content_block,
+    render_message,
+    render_user_message_content,
     analyze_conversation,
     format_tool_stats,
     is_tool_result_message,
@@ -365,6 +367,57 @@ class TestRenderContentBlock:
         assert "truncatable" not in result
 
         assert result == snapshot_html
+
+
+class TestCopyButtonsAndMarkdown:
+    """Tests for per-message copy buttons and embedded markdown source.
+
+    The transcript page exposes two per-message buttons in the header so the
+    reader can copy either the rendered display text or the original markdown.
+    To do that we embed `data-markdown` on each block that has a markdown
+    source (assistant text, thinking, user text) and emit the two buttons in
+    the message header. JS reassembles the markdown at copy time.
+    """
+
+    def test_assistant_text_block_embeds_markdown_source(self):
+        block = {"type": "text", "text": "Hello **world**"}
+        result = render_content_block(block)
+        # Quotes inside attribute are HTML-escaped by Jinja's autoescape.
+        assert 'data-markdown="Hello **world**"' in result
+
+    def test_thinking_block_embeds_markdown_source(self):
+        block = {"type": "thinking", "thinking": "Weighing options"}
+        result = render_content_block(block)
+        assert 'data-markdown="Weighing options"' in result
+
+    def test_user_markdown_content_embeds_markdown_source(self):
+        message_data = {"content": "Please **explain** more"}
+        result = render_user_message_content(message_data)
+        assert 'data-markdown="Please **explain** more"' in result
+
+    def test_user_array_text_block_embeds_markdown_source(self):
+        message_data = {
+            "content": [
+                {"type": "text", "text": "Question with `code`"},
+            ]
+        }
+        result = render_user_message_content(message_data)
+        assert "data-markdown=" in result
+        assert "Question with `code`" in result
+
+    def test_message_header_has_copy_buttons(self):
+        message_json = json.dumps({"content": "Hello there"})
+        result = render_message("user", message_json, "2026-05-27T15:07:44.290Z")
+        # Both buttons live inside the message header so the user can copy
+        # either the rendered text or the underlying markdown.
+        assert 'class="copy-btn copy-text"' in result
+        assert 'class="copy-btn copy-md"' in result
+        # Buttons are inside the header, not the content body, so they don't
+        # become part of the copied text.
+        header_end = result.index("</div>", result.index("message-header"))
+        header_html = result[: header_end + len("</div>")]
+        assert "copy-text" in header_html
+        assert "copy-md" in header_html
 
 
 class TestAnalyzeConversation:

@@ -121,19 +121,24 @@
 {%- endif -%}
 {%- endmacro %}
 
-{# Thinking block - content_html is pre-rendered markdown so needs |safe #}
-{% macro thinking(content_html) %}
-<div class="thinking"><div class="thinking-label">Thinking</div>{{ content_html|safe }}</div>
+{# Thinking block - content_html is pre-rendered markdown so needs |safe.
+   markdown_source carries the pre-render text so the per-message "copy
+   markdown" button can reassemble the original markdown from the DOM. #}
+{% macro thinking(content_html, markdown_source='') %}
+<div class="thinking" data-markdown="{{ markdown_source }}"><div class="thinking-label">Thinking</div>{{ content_html|safe }}</div>
 {%- endmacro %}
 
-{# Assistant text - content_html is pre-rendered markdown so needs |safe #}
-{% macro assistant_text(content_html) %}
-<div class="assistant-text">{{ content_html|safe }}</div>
+{# Assistant text - content_html is pre-rendered markdown so needs |safe.
+   See thinking() for markdown_source rationale. #}
+{% macro assistant_text(content_html, markdown_source='') %}
+<div class="assistant-text" data-markdown="{{ markdown_source }}">{{ content_html|safe }}</div>
 {%- endmacro %}
 
-{# User content - content_html is pre-rendered so needs |safe #}
-{% macro user_content(content_html) %}
-<div class="user-content">{{ content_html|safe }}</div>
+{# User content - content_html is pre-rendered so needs |safe.
+   markdown_source is only set when content was a markdown string; for JSON
+   user content it stays empty so the copy-markdown JS skips it. #}
+{% macro user_content(content_html, markdown_source='') %}
+<div class="user-content" data-markdown="{{ markdown_source }}">{{ content_html|safe }}</div>
 {%- endmacro %}
 
 {# Image block with base64 data URL #}
@@ -151,9 +156,11 @@
 {%- endif %}
 {%- endmacro %}
 
-{# Message wrapper - content_html is pre-rendered so needs |safe #}
+{# Message wrapper - content_html is pre-rendered so needs |safe.
+   The two copy buttons live in the header (not the content body) so their
+   own text isn't included when JS reads message-content's innerText. #}
 {% macro message(role_class, role_label, msg_id, timestamp, content_html) %}
-<div class="message {{ role_class }}" id="{{ msg_id }}"><div class="message-header"><span class="role-label">{{ role_label }}</span><a href="#{{ msg_id }}" class="timestamp-link"><time datetime="{{ timestamp }}" data-timestamp="{{ timestamp }}">{{ timestamp }}</time></a></div><div class="message-content">{{ content_html|safe }}</div></div>
+<div class="message {{ role_class }}" id="{{ msg_id }}"><div class="message-header"><span class="role-label">{{ role_label }}</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#{{ msg_id }}" class="timestamp-link"><time datetime="{{ timestamp }}" data-timestamp="{{ timestamp }}">{{ timestamp }}</time></a></span></div><div class="message-content">{{ content_html|safe }}</div></div>
 {%- endmacro %}
 
 {# Continuation wrapper - content_html is pre-rendered so needs |safe #}
