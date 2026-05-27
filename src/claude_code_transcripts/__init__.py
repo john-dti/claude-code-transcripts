@@ -337,8 +337,92 @@ def find_all_sessions(folder, include_agents=False):
     return result
 
 
+def _get_tool_version():
+    """Return the installed package version, or 'unknown' for source-tree runs.
+
+    Used by the freshness-check feature to detect that the tool was upgraded
+    since a transcript was last rendered, so the user can re-render with the
+    new templates/CSS/JS.
+    """
+    try:
+        from importlib.metadata import version, PackageNotFoundError
+
+        try:
+            return version("claude-code-transcripts")
+        except PackageNotFoundError:
+            return "unknown"
+    except ImportError:
+        return "unknown"
+
+
+def _session_state_path(session_dir):
+    return Path(session_dir) / ".cct-state.json"
+
+
+def _read_session_state(session_dir):
+    """Return parsed session state dict, or None on any read/parse failure.
+
+    A None return is the signal to treat the session as stale (the sidecar
+    is missing or malformed, so we can't trust the existing output).
+    """
+    path = _session_state_path(session_dir)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _write_session_state(session_dir, source_path, source_mtime):
+    """Atomically write the per-session state sidecar.
+
+    Writes to a temp file then os.replace so a crash mid-write can't leave a
+    half-written sidecar that would mislead the next freshness check.
+    """
+    state = {
+        "tool_version": _get_tool_version(),
+        "source_mtime": source_mtime,
+        "source_path": str(source_path),
+    }
+    target = _session_state_path(session_dir)
+    tmp = target.with_name(target.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, target)
+
+
+def _session_is_stale(session_info, session_dir, current_version):
+    """Return (is_stale, reason). reason is empty when not stale.
+
+    Order of checks matters: a missing output dominates everything else, then
+    sidecar integrity, then version mismatch, then source mtime.
+    """
+    session_dir = Path(session_dir)
+    if not (session_dir / "index.html").exists():
+        return True, "no output yet"
+    state = _read_session_state(session_dir)
+    if state is None:
+        return True, "sidecar missing or malformed"
+    stored_version = state.get("tool_version", "unknown")
+    if stored_version != current_version:
+        return True, f"tool version changed: {stored_version} -> {current_version}"
+    stored_mtime = state.get("source_mtime")
+    if not isinstance(stored_mtime, (int, float)):
+        return True, "sidecar missing source mtime"
+    if session_info["mtime"] > stored_mtime:
+        return True, "source modified since render"
+    return False, ""
+
+
 def generate_batch_html(
-    source_folder, output_dir, include_agents=False, progress_callback=None
+    source_folder,
+    output_dir,
+    include_agents=False,
+    progress_callback=None,
+    only_stale=False,
 ):
     """Generate HTML archive for all sessions in a Claude projects folder.
 
@@ -353,36 +437,66 @@ def generate_batch_html(
         include_agents: Whether to include agent-* session files
         progress_callback: Optional callback(project_name, session_name, current, total)
             called after each session is processed
+        only_stale: When True, skip sessions whose output is already up to date
+            (per `.cct-state.json` sidecar). The per-project index regenerates
+            only for projects that had at least one stale session; the master
+            index regenerates if any project had changes.
 
-    Returns statistics dict with total_projects, total_sessions, failed_sessions, output_dir.
+    Returns statistics dict. Always includes total_projects, total_sessions
+    (== regenerated count), failed_sessions, output_dir. When only_stale is
+    True, also includes skipped_sessions and regenerated_sessions.
     """
     source_folder = Path(source_folder)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Find all sessions
     projects = find_all_sessions(source_folder, include_agents=include_agents)
 
-    # Calculate total for progress tracking
-    total_session_count = sum(len(p["sessions"]) for p in projects)
+    current_version = _get_tool_version() if only_stale else None
+
+    # When only_stale, the progress total reflects the stale count, not the
+    # full session count — otherwise the progress bar lies.
+    if only_stale:
+        total_session_count = 0
+        for project in projects:
+            for session in project["sessions"]:
+                session_dir = output_dir / project["name"] / session["path"].stem
+                is_stale, _ = _session_is_stale(session, session_dir, current_version)
+                if is_stale:
+                    total_session_count += 1
+    else:
+        total_session_count = sum(len(p["sessions"]) for p in projects)
+
     processed_count = 0
     successful_sessions = 0
+    skipped_sessions = 0
     failed_sessions = []
+    any_project_changed = False
 
-    # Process each project
     for project in projects:
         project_dir = output_dir / project["name"]
         project_dir.mkdir(exist_ok=True)
+        project_changed = False
 
-        # Process each session
         for session in project["sessions"]:
             session_name = session["path"].stem
             session_dir = project_dir / session_name
+
+            if only_stale:
+                is_stale, _ = _session_is_stale(session, session_dir, current_version)
+                if not is_stale:
+                    skipped_sessions += 1
+                    continue
 
             # Generate transcript HTML with error handling
             try:
                 generate_html(session["path"], session_dir)
                 successful_sessions += 1
+                # Record the mtime we actually rendered against, not a re-stat
+                # — if the source kept growing during conversion, the next run
+                # should still detect it as stale.
+                _write_session_state(session_dir, session["path"], session["mtime"])
+                project_changed = True
             except Exception as e:
                 failed_sessions.append(
                     {
@@ -394,24 +508,35 @@ def generate_batch_html(
 
             processed_count += 1
 
-            # Call progress callback if provided
             if progress_callback:
                 progress_callback(
                     project["name"], session_name, processed_count, total_session_count
                 )
 
-        # Generate project index
-        _generate_project_index(project, project_dir)
+        # In full-rebuild mode, always regenerate the per-project index. In
+        # incremental mode, only when this project actually had a regeneration
+        # — otherwise an unchanged project's index would be needlessly rewritten.
+        if not only_stale or project_changed:
+            _generate_project_index(project, project_dir)
 
-    # Generate master index
-    _generate_master_index(projects, output_dir)
+        if project_changed:
+            any_project_changed = True
 
-    return {
+    # Master index re-renders on full rebuild always, or in incremental mode
+    # whenever any project changed (session counts/dates feed it).
+    if not only_stale or any_project_changed:
+        _generate_master_index(projects, output_dir)
+
+    stats = {
         "total_projects": len(projects),
         "total_sessions": successful_sessions,
         "failed_sessions": failed_sessions,
         "output_dir": output_dir,
     }
+    if only_stale:
+        stats["regenerated_sessions"] = successful_sessions
+        stats["skipped_sessions"] = skipped_sessions
+    return stats
 
 
 def _generate_project_index(project, output_dir):
@@ -2228,6 +2353,20 @@ def web_cmd(
     help="Show what would be converted without creating files.",
 )
 @click.option(
+    "--check",
+    "check_only",
+    is_flag=True,
+    help="Report which session outputs are stale (source modified or tool "
+    "version changed) without writing. Exits non-zero if any are stale.",
+)
+@click.option(
+    "--if-stale",
+    "if_stale",
+    is_flag=True,
+    help="Only regenerate sessions whose source JSONL was modified since the "
+    "last render, or whose recorded tool version differs from the current one.",
+)
+@click.option(
     "--open",
     "open_browser",
     is_flag=True,
@@ -2239,7 +2378,16 @@ def web_cmd(
     is_flag=True,
     help="Suppress all output except errors.",
 )
-def all_cmd(source, output, include_agents, dry_run, open_browser, quiet):
+def all_cmd(
+    source,
+    output,
+    include_agents,
+    dry_run,
+    check_only,
+    if_stale,
+    open_browser,
+    quiet,
+):
     """Convert all local Claude Code sessions to a browsable HTML archive.
 
     Creates a directory structure with:
@@ -2247,6 +2395,18 @@ def all_cmd(source, output, include_agents, dry_run, open_browser, quiet):
     - Per-project pages listing sessions
     - Individual session transcripts
     """
+    # --dry-run, --check, and --if-stale all alter the default "rebuild
+    # everything" behavior in incompatible ways. Reject combinations up front
+    # rather than letting them silently override each other.
+    mode_flags = {
+        "--dry-run": dry_run,
+        "--check": check_only,
+        "--if-stale": if_stale,
+    }
+    enabled = [name for name, on in mode_flags.items() if on]
+    if len(enabled) > 1:
+        raise click.UsageError(f"{' and '.join(enabled)} are mutually exclusive.")
+
     # Default source folder
     if source is None:
         source = Path.home() / ".claude" / "projects"
@@ -2291,6 +2451,25 @@ def all_cmd(source, output, include_agents, dry_run, open_browser, quiet):
                     click.echo(f"    ... and {len(project['sessions']) - 3} more")
         return
 
+    if check_only:
+        current_version = _get_tool_version()
+        stale = []
+        for project in projects:
+            for session in project["sessions"]:
+                session_dir = output / project["name"] / session["path"].stem
+                is_stale, reason = _session_is_stale(
+                    session, session_dir, current_version
+                )
+                if is_stale:
+                    stale.append((project["name"], session["path"].stem, reason))
+        if not quiet:
+            for project_name, stem, reason in stale:
+                click.echo(f"STALE  {project_name}/{stem}  {reason}")
+            click.echo(f"{len(stale)} of {total_sessions} stale.")
+        if stale:
+            raise click.exceptions.Exit(1)
+        return
+
     if not quiet:
         click.echo(f"\nGenerating archive in {output}...")
 
@@ -2305,6 +2484,7 @@ def all_cmd(source, output, include_agents, dry_run, open_browser, quiet):
         output,
         include_agents=include_agents,
         progress_callback=on_progress,
+        only_stale=if_stale,
     )
 
     # Report any failures
@@ -2316,10 +2496,17 @@ def all_cmd(source, output, include_agents, dry_run, open_browser, quiet):
             )
 
     if not quiet:
-        click.echo(
-            f"\nGenerated archive with {stats['total_projects']} projects, "
-            f"{stats['total_sessions']} sessions"
-        )
+        if if_stale:
+            click.echo(
+                f"\nregenerated {stats['regenerated_sessions']}, "
+                f"skipped {stats['skipped_sessions']}, "
+                f"failed {len(stats['failed_sessions'])}"
+            )
+        else:
+            click.echo(
+                f"\nGenerated archive with {stats['total_projects']} projects, "
+                f"{stats['total_sessions']} sessions"
+            )
         click.echo(f"Output: {output.resolve()}")
 
     if open_browser:

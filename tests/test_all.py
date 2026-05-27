@@ -495,6 +495,408 @@ class TestAllCommand:
         assert not (output_dir / "index.html").exists()
 
 
+class TestFreshnessCheck:
+    """Tests for the --check and --if-stale freshness flags on the all command.
+
+    A session's output is "stale" when (a) no output exists yet, (b) its source
+    JSONL was modified after the recorded render time, or (c) the tool version
+    that produced the output differs from the currently installed version. A
+    sidecar `.cct-state.json` per session output dir captures the source mtime
+    and tool version recorded at render time.
+    """
+
+    def test_check_reports_zero_stale_immediately_after_full_run(
+        self, mock_projects_dir, output_dir
+    ):
+        """After a full archive build, --check must report 0 stale and exit 0."""
+        runner = CliRunner()
+        # Build the archive
+        first = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+        assert first.exit_code == 0, first.output
+
+        # Immediately check — nothing should be stale
+        check = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--check",
+            ],
+        )
+        assert check.exit_code == 0, check.output
+        assert "0 of " in check.output
+        assert "stale" in check.output
+
+    def test_check_reports_stale_after_jsonl_touched(
+        self, mock_projects_dir, output_dir
+    ):
+        """Touching one source JSONL must flag exactly that session stale."""
+        import os as _os
+
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+
+        # Bump the mtime of one JSONL to "future" (one hour ahead).
+        target = mock_projects_dir / "-home-user-projects-project-a" / "abc123.jsonl"
+        stat = target.stat()
+        _os.utime(target, (stat.st_atime, stat.st_mtime + 3600))
+
+        check = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--check",
+            ],
+        )
+        assert check.exit_code == 1
+        assert "1 of " in check.output
+        assert "abc123" in check.output
+        assert "source modified since render" in check.output
+
+    def test_check_reports_stale_when_tool_version_changes(
+        self, mock_projects_dir, output_dir, monkeypatch
+    ):
+        """Bumping the recorded tool version must flag every session stale."""
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+
+        # Simulate an upgrade: the running tool now reports a different version
+        # than the sidecars recorded at render time.
+        monkeypatch.setattr(
+            "claude_code_transcripts._get_tool_version", lambda: "9.99-test"
+        )
+
+        check = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--check",
+            ],
+        )
+        assert check.exit_code == 1
+        assert "tool version changed" in check.output
+        assert "-> 9.99-test" in check.output
+
+    def test_check_reports_all_stale_when_no_output_exists(
+        self, mock_projects_dir, output_dir
+    ):
+        """An empty output directory: every discoverable session must be stale."""
+        runner = CliRunner()
+        check = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--check",
+            ],
+        )
+        assert check.exit_code == 1
+        # mock_projects_dir has 3 sessions visible without --include-agents
+        # (abc123 + def456 in project-a, ghi789 in project-b).
+        assert "3 of 3 stale" in check.output
+        assert check.output.count("no output yet") == 3
+
+    def test_check_treats_malformed_sidecar_as_stale(
+        self, mock_projects_dir, output_dir
+    ):
+        """A corrupt .cct-state.json must be treated as stale, not a crash."""
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+
+        sidecar = output_dir / "project-a" / "abc123" / ".cct-state.json"
+        assert (
+            sidecar.exists()
+        ), "fixture precondition: sidecar should have been written"
+        sidecar.write_text("not valid json {{{", encoding="utf-8")
+
+        check = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--check",
+            ],
+        )
+        assert check.exit_code == 1
+        assert "abc123" in check.output
+        assert "sidecar missing or malformed" in check.output
+
+    def test_if_stale_skips_fresh_sessions(self, mock_projects_dir, output_dir):
+        """If everything is fresh, --if-stale must not rewrite any session HTML."""
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+
+        # Snapshot every output file's mtime before the second run.
+        before = {
+            p: p.stat().st_mtime
+            for p in output_dir.rglob("*")
+            if p.is_file() and p.suffix == ".html"
+        }
+
+        second = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--if-stale",
+            ],
+        )
+        assert second.exit_code == 0, second.output
+        assert "regenerated 0" in second.output
+
+        after = {
+            p: p.stat().st_mtime
+            for p in output_dir.rglob("*")
+            if p.is_file() and p.suffix == ".html"
+        }
+        # Same set of files, and every mtime unchanged.
+        assert set(before) == set(after)
+        for path, mtime in before.items():
+            assert after[path] == mtime, f"{path} was rewritten"
+
+    def test_if_stale_regenerates_only_stale_session(
+        self, mock_projects_dir, output_dir
+    ):
+        """Only the touched JSONL's output HTML should advance in mtime."""
+        import os as _os
+
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+
+        touched = mock_projects_dir / "-home-user-projects-project-a" / "abc123.jsonl"
+        stat = touched.stat()
+        _os.utime(touched, (stat.st_atime, stat.st_mtime + 3600))
+
+        # Snapshot session HTMLs by stem.
+        def snapshot():
+            return {
+                p.parent.name: p.stat().st_mtime
+                for p in output_dir.rglob("index.html")
+                if p.parent.parent.name in {"project-a", "project-b"}
+            }
+
+        before = snapshot()
+        result = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--if-stale",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "regenerated 1" in result.output
+        assert "skipped 2" in result.output
+
+        after = snapshot()
+        # The touched session advances; the other two stay put.
+        assert after["abc123"] > before["abc123"]
+        for stem in ("def456", "ghi789"):
+            assert after[stem] == before[stem], f"{stem} was unexpectedly rewritten"
+
+    def test_if_stale_regenerates_indexes_when_any_session_regenerated(
+        self, mock_projects_dir, output_dir
+    ):
+        """When a session in project-a re-renders, project-a's index and the
+        master index re-render; project-b's index does not."""
+        import os as _os
+
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+
+        # Touch one session in project-a.
+        touched = mock_projects_dir / "-home-user-projects-project-a" / "abc123.jsonl"
+        stat = touched.stat()
+        _os.utime(touched, (stat.st_atime, stat.st_mtime + 3600))
+
+        master_idx = output_dir / "index.html"
+        proj_a_idx = output_dir / "project-a" / "index.html"
+        proj_b_idx = output_dir / "project-b" / "index.html"
+
+        before_master = master_idx.stat().st_mtime
+        before_a = proj_a_idx.stat().st_mtime
+        before_b = proj_b_idx.stat().st_mtime
+
+        result = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--if-stale",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        # The master index always re-renders when anything changed (counts /
+        # dates may have shifted), and project-a's index re-renders because
+        # one of its sessions was regenerated.
+        assert master_idx.stat().st_mtime > before_master
+        assert proj_a_idx.stat().st_mtime > before_a
+        # project-b had no stale session; its index should be untouched.
+        assert proj_b_idx.stat().st_mtime == before_b
+
+    def test_check_and_if_stale_are_mutually_exclusive(
+        self, mock_projects_dir, output_dir
+    ):
+        """Passing both --check and --if-stale should be a usage error."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--check",
+                "--if-stale",
+            ],
+        )
+        # click.UsageError exits with code 2 ("incorrect usage").
+        assert result.exit_code == 2
+        assert "mutually exclusive" in result.output.lower() or (
+            "--check" in result.output and "--if-stale" in result.output
+        )
+
+    def test_check_does_not_write_anything(self, mock_projects_dir, output_dir):
+        """--check must be byte-identical: same files, same mtimes, same content."""
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+
+        # Capture the full tree (path -> (mtime, size, bytes)).
+        def snapshot():
+            return {
+                p: (p.stat().st_mtime, p.stat().st_size, p.read_bytes())
+                for p in output_dir.rglob("*")
+                if p.is_file()
+            }
+
+        before = snapshot()
+        result = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--check",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        after = snapshot()
+        assert set(before) == set(after), "file set changed"
+        for path in before:
+            assert before[path] == after[path], f"{path} was modified by --check"
+
+
 class TestJsonCommandWithUrl:
     """Tests for the json command with URL support."""
 
