@@ -163,6 +163,59 @@ class TestFindAllSessions:
             assert "summary" in session
             assert session["summary"] != "(no summary)"
 
+    def test_merges_folders_with_same_display_name(self, tmp_path):
+        """Folders whose display names collide must merge into one project.
+
+        Regression test: on Windows, the same logical project can appear under
+        multiple raw folder names (e.g., C--projects-devjig and d--projects-devjig
+        after a drive move). get_project_display_name collapses both to "devjig",
+        but the raw folder name was used as the dict key, creating duplicate
+        project entries that both wrote to the same output directory — silently
+        overwriting each other's index.html.
+        """
+        import os
+
+        # Both resolve to display name "merged" via get_project_display_name
+        folder_a = tmp_path / "-home-alice-projects-merged"
+        folder_b = tmp_path / "-mnt-c-Users-bob-projects-merged"
+        folder_a.mkdir(parents=True)
+        folder_b.mkdir(parents=True)
+
+        # Two sessions in each folder
+        sessions = [
+            (folder_a / "aaa.jsonl", "2025-01-01T10:00:00.000Z", "A1"),
+            (folder_a / "bbb.jsonl", "2025-01-03T10:00:00.000Z", "A2"),
+            (folder_b / "ccc.jsonl", "2025-01-02T10:00:00.000Z", "B1"),
+            (folder_b / "ddd.jsonl", "2025-01-04T10:00:00.000Z", "B2"),
+        ]
+        for path, ts, content in sessions:
+            path.write_text(
+                f'{{"type": "user", "timestamp": "{ts}", '
+                f'"message": {{"role": "user", "content": "{content}"}}}}\n'
+                f'{{"type": "assistant", "timestamp": "{ts}", '
+                f'"message": {{"role": "assistant", "content": '
+                f'[{{"type": "text", "text": "ok"}}]}}}}\n'
+            )
+
+        # Stagger file mtimes so sort assertions are deterministic
+        os.utime(folder_a / "aaa.jsonl", (1735725600, 1735725600))  # oldest
+        os.utime(folder_b / "ccc.jsonl", (1735812000, 1735812000))
+        os.utime(folder_a / "bbb.jsonl", (1735898400, 1735898400))
+        os.utime(folder_b / "ddd.jsonl", (1735984800, 1735984800))  # newest
+
+        result = find_all_sessions(tmp_path)
+
+        # Both source folders merge into a single "merged" project
+        assert len(result) == 1
+        assert result[0]["name"] == "merged"
+
+        # All four sessions are present, not just one folder's subset
+        assert len(result[0]["sessions"]) == 4
+
+        # Sessions from both source folders interleave correctly by mtime
+        names = [s["path"].name for s in result[0]["sessions"]]
+        assert names == ["ddd.jsonl", "bbb.jsonl", "ccc.jsonl", "aaa.jsonl"]
+
 
 class TestGenerateBatchHtml:
     """Tests for generate_batch_html function."""

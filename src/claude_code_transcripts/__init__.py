@@ -269,19 +269,20 @@ def find_all_sessions(folder, include_agents=False):
         if summary.lower() == "warmup" or summary == "(no summary)":
             continue
 
-        # Get project folder
-        project_folder = session_file.parent
-        project_key = project_folder.name
+        # Group by display name so folders that resolve to the same project
+        # (e.g., C--projects-devjig and d--projects-devjig after a drive move)
+        # merge into a single entry instead of silently overwriting each other
+        # when the display name is later used as an output directory.
+        display_name = get_project_display_name(session_file.parent.name)
 
-        if project_key not in projects:
-            projects[project_key] = {
-                "name": get_project_display_name(project_key),
-                "path": project_folder,
+        if display_name not in projects:
+            projects[display_name] = {
+                "name": display_name,
                 "sessions": [],
             }
 
         stat = session_file.stat()
-        projects[project_key]["sessions"].append(
+        projects[display_name]["sessions"].append(
             {
                 "path": session_file,
                 "summary": summary,
