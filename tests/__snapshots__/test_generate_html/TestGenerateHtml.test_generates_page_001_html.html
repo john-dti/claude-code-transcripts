@@ -20,6 +20,12 @@ h1 { font-size: 1.5rem; margin-bottom: 24px; padding-bottom: 8px; border-bottom:
 .tool-reply .tool-result { background: transparent; padding: 0; margin: 0; }
 .tool-reply .tool-result .truncatable.truncated::after { background: linear-gradient(to bottom, transparent, #fff8e1); }
 .message-header { display: flex; justify-content: space-between; align-items: center; padding: 8px 16px; background: rgba(0,0,0,0.03); font-size: 0.85rem; }
+.message-header-actions { display: flex; align-items: center; gap: 6px; }
+.copy-btn { background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 0.8rem; line-height: 1; color: var(--text-muted); opacity: 0.55; transition: opacity 0.15s, background 0.15s, color 0.15s; }
+.copy-btn:hover { opacity: 1; background: rgba(0,0,0,0.06); color: var(--text-color); }
+.copy-btn.copied { background: #c8e6c9; color: #1b5e20; opacity: 1; border-color: #81c784; }
+.copy-btn.failed { background: #ffcdd2; color: #b71c1c; opacity: 1; border-color: #ef9a9a; }
+.copy-md { font-family: monospace; font-weight: 600; }
 .role-label { font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
 .user .role-label { color: var(--user-border); }
 time { color: var(--text-muted); font-size: 0.8rem; }
@@ -157,14 +163,18 @@ details.continuation[open] summary { border-radius: 12px 12px 0 0; margin-bottom
 </div>
 
         
-<div class="message user" id="msg-2025-12-24T10-00-00-000Z"><div class="message-header"><span class="role-label">User</span><a href="#msg-2025-12-24T10-00-00-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:00.000Z" data-timestamp="2025-12-24T10:00:00.000Z">2025-12-24T10:00:00.000Z</time></a></div><div class="message-content">
-<div class="user-content"><p>Create a simple Python function to add two numbers</p></div></div></div>
-<div class="message assistant" id="msg-2025-12-24T10-00-05-000Z"><div class="message-header"><span class="role-label">Assistant</span><a href="#msg-2025-12-24T10-00-05-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:05.000Z" data-timestamp="2025-12-24T10:00:05.000Z">2025-12-24T10:00:05.000Z</time></a></div><div class="message-content">
-<div class="thinking"><div class="thinking-label">Thinking</div><p>The user wants a simple addition function. I should:
+<div class="message user" id="msg-2025-12-24T10-00-00-000Z"><div class="message-header"><span class="role-label">User</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-00-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:00.000Z" data-timestamp="2025-12-24T10:00:00.000Z">2025-12-24T10:00:00.000Z</time></a></span></div><div class="message-content">
+<div class="user-content" data-markdown="Create a simple Python function to add two numbers"><p>Create a simple Python function to add two numbers</p></div></div></div>
+<div class="message assistant" id="msg-2025-12-24T10-00-05-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-05-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:05.000Z" data-timestamp="2025-12-24T10:00:05.000Z">2025-12-24T10:00:05.000Z</time></a></span></div><div class="message-content">
+<div class="thinking" data-markdown="The user wants a simple addition function. I should:
+1. Create the function
+2. Add a basic test
+
+This is straightforward."><div class="thinking-label">Thinking</div><p>The user wants a simple addition function. I should:
 1. Create the function
 2. Add a basic test</p>
 <p>This is straightforward.</p></div>
-<div class="assistant-text"><p>I'll create a simple Python function for you. Let me write it now.</p></div><div class="file-tool write-tool" data-tool-id="toolu_write_001">
+<div class="assistant-text" data-markdown="I&#39;ll create a simple Python function for you. Let me write it now."><p>I'll create a simple Python function for you. Let me write it now.</p></div><div class="file-tool write-tool" data-tool-id="toolu_write_001">
 <div class="file-tool-header write-header"><span class="file-tool-icon">📝</span> Write <span class="file-tool-path">math_utils.py</span></div>
 <div class="file-tool-fullpath">/project/math_utils.py</div>
 <div class="truncatable"><div class="truncatable-content"><pre class="file-content">def add(a: int, b: int) -&gt; int:
@@ -172,51 +182,51 @@ details.continuation[open] summary { border-radius: 12px 12px 0 0; margin-bottom
     return a + b
 </pre></div><button class="expand-btn">Show more</button></div>
 </div></div></div>
-<div class="message tool-reply" id="msg-2025-12-24T10-00-10-000Z"><div class="message-header"><span class="role-label">Tool reply</span><a href="#msg-2025-12-24T10-00-10-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:10.000Z" data-timestamp="2025-12-24T10:00:10.000Z">2025-12-24T10:00:10.000Z</time></a></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>File written successfully</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
-<div class="message assistant" id="msg-2025-12-24T10-00-15-000Z"><div class="message-header"><span class="role-label">Assistant</span><a href="#msg-2025-12-24T10-00-15-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:15.000Z" data-timestamp="2025-12-24T10:00:15.000Z">2025-12-24T10:00:15.000Z</time></a></div><div class="message-content">
-<div class="assistant-text"><p>I've created the <code>add</code> function. Now let me run the tests.</p></div>
+<div class="message tool-reply" id="msg-2025-12-24T10-00-10-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-10-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:10.000Z" data-timestamp="2025-12-24T10:00:10.000Z">2025-12-24T10:00:10.000Z</time></a></span></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>File written successfully</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
+<div class="message assistant" id="msg-2025-12-24T10-00-15-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-15-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:15.000Z" data-timestamp="2025-12-24T10:00:15.000Z">2025-12-24T10:00:15.000Z</time></a></span></div><div class="message-content">
+<div class="assistant-text" data-markdown="I&#39;ve created the `add` function. Now let me run the tests."><p>I've created the <code>add</code> function. Now let me run the tests.</p></div>
 <div class="tool-use bash-tool" data-tool-id="toolu_bash_001">
 <div class="tool-header"><span class="tool-icon">$</span> Bash</div>
 <div class="tool-description">Run pytest on tests directory</div><div class="truncatable"><div class="truncatable-content"><pre class="bash-command">python -m pytest tests/</pre></div><button class="expand-btn">Show more</button></div>
 </div></div></div>
-<div class="message tool-reply" id="msg-2025-12-24T10-00-20-000Z"><div class="message-header"><span class="role-label">Tool reply</span><a href="#msg-2025-12-24T10-00-20-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:20.000Z" data-timestamp="2025-12-24T10:00:20.000Z">2025-12-24T10:00:20.000Z</time></a></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>===== test session starts =====
+<div class="message tool-reply" id="msg-2025-12-24T10-00-20-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-20-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:20.000Z" data-timestamp="2025-12-24T10:00:20.000Z">2025-12-24T10:00:20.000Z</time></a></span></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>===== test session starts =====
 collected 2 items
 
 tests/test_math.py ..  [100%]
 
 ===== 2 passed in 0.05s =====</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
-<div class="message assistant" id="msg-2025-12-24T10-00-25-000Z"><div class="message-header"><span class="role-label">Assistant</span><a href="#msg-2025-12-24T10-00-25-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:25.000Z" data-timestamp="2025-12-24T10:00:25.000Z">2025-12-24T10:00:25.000Z</time></a></div><div class="message-content">
-<div class="assistant-text"><p>All tests pass. Let me update the todo list and make a commit.</p></div>
+<div class="message assistant" id="msg-2025-12-24T10-00-25-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-25-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:25.000Z" data-timestamp="2025-12-24T10:00:25.000Z">2025-12-24T10:00:25.000Z</time></a></span></div><div class="message-content">
+<div class="assistant-text" data-markdown="All tests pass. Let me update the todo list and make a commit."><p>All tests pass. Let me update the todo list and make a commit.</p></div>
 <div class="todo-list" data-tool-id="toolu_todo_001"><div class="todo-header"><span class="todo-header-icon">☰</span> Task List</div><ul class="todo-items"><li class="todo-item todo-completed"><span class="todo-icon">✓</span><span class="todo-content">Create add function</span></li><li class="todo-item todo-completed"><span class="todo-icon">✓</span><span class="todo-content">Write tests</span></li><li class="todo-item todo-completed"><span class="todo-icon">✓</span><span class="todo-content">Run tests</span></li><li class="todo-item todo-in-progress"><span class="todo-icon">→</span><span class="todo-content">Commit changes</span></li><li class="todo-item todo-pending"><span class="todo-icon">○</span><span class="todo-content">Push to remote</span></li></ul></div></div></div>
-<div class="message tool-reply" id="msg-2025-12-24T10-00-30-000Z"><div class="message-header"><span class="role-label">Tool reply</span><a href="#msg-2025-12-24T10-00-30-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:30.000Z" data-timestamp="2025-12-24T10:00:30.000Z">2025-12-24T10:00:30.000Z</time></a></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>Todos updated</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
-<div class="message assistant" id="msg-2025-12-24T10-00-35-000Z"><div class="message-header"><span class="role-label">Assistant</span><a href="#msg-2025-12-24T10-00-35-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:35.000Z" data-timestamp="2025-12-24T10:00:35.000Z">2025-12-24T10:00:35.000Z</time></a></div><div class="message-content">
+<div class="message tool-reply" id="msg-2025-12-24T10-00-30-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-30-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:30.000Z" data-timestamp="2025-12-24T10:00:30.000Z">2025-12-24T10:00:30.000Z</time></a></span></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>Todos updated</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
+<div class="message assistant" id="msg-2025-12-24T10-00-35-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-35-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:35.000Z" data-timestamp="2025-12-24T10:00:35.000Z">2025-12-24T10:00:35.000Z</time></a></span></div><div class="message-content">
 <div class="tool-use bash-tool" data-tool-id="toolu_bash_002">
 <div class="tool-header"><span class="tool-icon">$</span> Bash</div>
 <div class="tool-description">Commit changes</div><div class="truncatable"><div class="truncatable-content"><pre class="bash-command">git add . &amp;&amp; git commit -m &#39;Add math_utils with add function&#39;</pre></div><button class="expand-btn">Show more</button></div>
 </div></div></div>
-<div class="message tool-reply" id="msg-2025-12-24T10-00-40-000Z"><div class="message-header"><span class="role-label">Tool reply</span><a href="#msg-2025-12-24T10-00-40-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:40.000Z" data-timestamp="2025-12-24T10:00:40.000Z">2025-12-24T10:00:40.000Z</time></a></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><div class="commit-card"><a href="https://github.com/example/project/commit/abc1234"><span class="commit-card-hash">abc1234</span> Add math_utils with add function</a></div><pre>1 file changed, 5 insertions(+)</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
-<div class="message assistant" id="msg-2025-12-24T10-00-45-000Z"><div class="message-header"><span class="role-label">Assistant</span><a href="#msg-2025-12-24T10-00-45-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:45.000Z" data-timestamp="2025-12-24T10:00:45.000Z">2025-12-24T10:00:45.000Z</time></a></div><div class="message-content">
-<div class="assistant-text"><p>Committed! Now pushing to remote.</p></div>
+<div class="message tool-reply" id="msg-2025-12-24T10-00-40-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-40-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:40.000Z" data-timestamp="2025-12-24T10:00:40.000Z">2025-12-24T10:00:40.000Z</time></a></span></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><div class="commit-card"><a href="https://github.com/example/project/commit/abc1234"><span class="commit-card-hash">abc1234</span> Add math_utils with add function</a></div><pre>1 file changed, 5 insertions(+)</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
+<div class="message assistant" id="msg-2025-12-24T10-00-45-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-45-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:45.000Z" data-timestamp="2025-12-24T10:00:45.000Z">2025-12-24T10:00:45.000Z</time></a></span></div><div class="message-content">
+<div class="assistant-text" data-markdown="Committed! Now pushing to remote."><p>Committed! Now pushing to remote.</p></div>
 <div class="tool-use bash-tool" data-tool-id="toolu_bash_003">
 <div class="tool-header"><span class="tool-icon">$</span> Bash</div>
 <div class="tool-description">Push to remote</div><div class="truncatable"><div class="truncatable-content"><pre class="bash-command">git push -u origin main</pre></div><button class="expand-btn">Show more</button></div>
 </div></div></div>
-<div class="message tool-reply" id="msg-2025-12-24T10-00-50-000Z"><div class="message-header"><span class="role-label">Tool reply</span><a href="#msg-2025-12-24T10-00-50-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:50.000Z" data-timestamp="2025-12-24T10:00:50.000Z">2025-12-24T10:00:50.000Z</time></a></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>remote: 
+<div class="message tool-reply" id="msg-2025-12-24T10-00-50-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-50-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:50.000Z" data-timestamp="2025-12-24T10:00:50.000Z">2025-12-24T10:00:50.000Z</time></a></span></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>remote: 
 remote: Create a pull request for &#x27;main&#x27; on GitHub by visiting:
 remote:      https://github.com/example/project/pull/new/main
 remote: 
 To github.com:example/project.git
    def5678..abc1234  main -&gt; main</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
-<div class="message user" id="msg-2025-12-24T10-01-00-000Z"><div class="message-header"><span class="role-label">User</span><a href="#msg-2025-12-24T10-01-00-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:00.000Z" data-timestamp="2025-12-24T10:01:00.000Z">2025-12-24T10:01:00.000Z</time></a></div><div class="message-content">
-<div class="user-content"><p>Now edit the file to add a subtract function</p></div></div></div>
-<div class="message assistant" id="msg-2025-12-24T10-01-05-000Z"><div class="message-header"><span class="role-label">Assistant</span><a href="#msg-2025-12-24T10-01-05-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:05.000Z" data-timestamp="2025-12-24T10:01:05.000Z">2025-12-24T10:01:05.000Z</time></a></div><div class="message-content">
+<div class="message user" id="msg-2025-12-24T10-01-00-000Z"><div class="message-header"><span class="role-label">User</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-01-00-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:00.000Z" data-timestamp="2025-12-24T10:01:00.000Z">2025-12-24T10:01:00.000Z</time></a></span></div><div class="message-content">
+<div class="user-content" data-markdown="Now edit the file to add a subtract function"><p>Now edit the file to add a subtract function</p></div></div></div>
+<div class="message assistant" id="msg-2025-12-24T10-01-05-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-01-05-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:05.000Z" data-timestamp="2025-12-24T10:01:05.000Z">2025-12-24T10:01:05.000Z</time></a></span></div><div class="message-content">
 <div class="tool-use" data-tool-id="toolu_glob_001"><div class="tool-header"><span class="tool-icon">⚙</span> Glob</div><div class="truncatable"><div class="truncatable-content"><pre class="json">{
   &#34;pattern&#34;: &#34;**/*.py&#34;,
   &#34;path&#34;: &#34;/project&#34;
 }</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
-<div class="message tool-reply" id="msg-2025-12-24T10-01-10-000Z"><div class="message-header"><span class="role-label">Tool reply</span><a href="#msg-2025-12-24T10-01-10-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:10.000Z" data-timestamp="2025-12-24T10:01:10.000Z">2025-12-24T10:01:10.000Z</time></a></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>/project/math_utils.py
+<div class="message tool-reply" id="msg-2025-12-24T10-01-10-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-01-10-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:10.000Z" data-timestamp="2025-12-24T10:01:10.000Z">2025-12-24T10:01:10.000Z</time></a></span></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>/project/math_utils.py
 /project/tests/test_math.py</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
-<div class="message assistant" id="msg-2025-12-24T10-01-15-000Z"><div class="message-header"><span class="role-label">Assistant</span><a href="#msg-2025-12-24T10-01-15-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:15.000Z" data-timestamp="2025-12-24T10:01:15.000Z">2025-12-24T10:01:15.000Z</time></a></div><div class="message-content"><div class="file-tool edit-tool" data-tool-id="toolu_edit_001">
+<div class="message assistant" id="msg-2025-12-24T10-01-15-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-01-15-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:15.000Z" data-timestamp="2025-12-24T10:01:15.000Z">2025-12-24T10:01:15.000Z</time></a></span></div><div class="message-content"><div class="file-tool edit-tool" data-tool-id="toolu_edit_001">
 <div class="file-tool-header edit-header"><span class="file-tool-icon">✏️</span> Edit <span class="file-tool-path">math_utils.py</span></div>
 <div class="file-tool-fullpath">/project/math_utils.py</div>
 <div class="truncatable"><div class="truncatable-content">
@@ -231,27 +241,37 @@ def subtract(a: int, b: int) -&gt; int:
 </pre></div>
 </div><button class="expand-btn">Show more</button></div>
 </div></div></div>
-<div class="message tool-reply" id="msg-2025-12-24T10-01-20-000Z"><div class="message-header"><span class="role-label">Tool reply</span><a href="#msg-2025-12-24T10-01-20-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:20.000Z" data-timestamp="2025-12-24T10:01:20.000Z">2025-12-24T10:01:20.000Z</time></a></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>File edited successfully</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
-<div class="message assistant" id="msg-2025-12-24T10-01-25-000Z"><div class="message-header"><span class="role-label">Assistant</span><a href="#msg-2025-12-24T10-01-25-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:25.000Z" data-timestamp="2025-12-24T10:01:25.000Z">2025-12-24T10:01:25.000Z</time></a></div><div class="message-content">
-<div class="assistant-text"><p>Added the subtract function. Let me verify with grep.</p></div>
+<div class="message tool-reply" id="msg-2025-12-24T10-01-20-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-01-20-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:20.000Z" data-timestamp="2025-12-24T10:01:20.000Z">2025-12-24T10:01:20.000Z</time></a></span></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>File edited successfully</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
+<div class="message assistant" id="msg-2025-12-24T10-01-25-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-01-25-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:25.000Z" data-timestamp="2025-12-24T10:01:25.000Z">2025-12-24T10:01:25.000Z</time></a></span></div><div class="message-content">
+<div class="assistant-text" data-markdown="Added the subtract function. Let me verify with grep."><p>Added the subtract function. Let me verify with grep.</p></div>
 <div class="tool-use" data-tool-id="toolu_grep_001"><div class="tool-header"><span class="tool-icon">⚙</span> Grep</div><div class="truncatable"><div class="truncatable-content"><pre class="json">{
   &#34;pattern&#34;: &#34;def subtract&#34;,
   &#34;path&#34;: &#34;/project&#34;,
   &#34;output_mode&#34;: &#34;content&#34;
 }</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
-<div class="message tool-reply" id="msg-2025-12-24T10-01-30-000Z"><div class="message-header"><span class="role-label">Tool reply</span><a href="#msg-2025-12-24T10-01-30-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:30.000Z" data-timestamp="2025-12-24T10:01:30.000Z">2025-12-24T10:01:30.000Z</time></a></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>/project/math_utils.py:6:def subtract(a: int, b: int) -&gt; int:</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
-<div class="message user" id="msg-2025-12-24T10-02-00-000Z"><div class="message-header"><span class="role-label">User</span><a href="#msg-2025-12-24T10-02-00-000Z" class="timestamp-link"><time datetime="2025-12-24T10:02:00.000Z" data-timestamp="2025-12-24T10:02:00.000Z">2025-12-24T10:02:00.000Z</time></a></div><div class="message-content">
-<div class="user-content"><p>Run the tests again</p></div></div></div>
-<div class="message assistant" id="msg-2025-12-24T10-02-05-000Z"><div class="message-header"><span class="role-label">Assistant</span><a href="#msg-2025-12-24T10-02-05-000Z" class="timestamp-link"><time datetime="2025-12-24T10:02:05.000Z" data-timestamp="2025-12-24T10:02:05.000Z">2025-12-24T10:02:05.000Z</time></a></div><div class="message-content">
+<div class="message tool-reply" id="msg-2025-12-24T10-01-30-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-01-30-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:30.000Z" data-timestamp="2025-12-24T10:01:30.000Z">2025-12-24T10:01:30.000Z</time></a></span></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>/project/math_utils.py:6:def subtract(a: int, b: int) -&gt; int:</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
+<div class="message user" id="msg-2025-12-24T10-02-00-000Z"><div class="message-header"><span class="role-label">User</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-02-00-000Z" class="timestamp-link"><time datetime="2025-12-24T10:02:00.000Z" data-timestamp="2025-12-24T10:02:00.000Z">2025-12-24T10:02:00.000Z</time></a></span></div><div class="message-content">
+<div class="user-content" data-markdown="Run the tests again"><p>Run the tests again</p></div></div></div>
+<div class="message assistant" id="msg-2025-12-24T10-02-05-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-02-05-000Z" class="timestamp-link"><time datetime="2025-12-24T10:02:05.000Z" data-timestamp="2025-12-24T10:02:05.000Z">2025-12-24T10:02:05.000Z</time></a></span></div><div class="message-content">
 <div class="tool-use bash-tool" data-tool-id="toolu_bash_004">
 <div class="tool-header"><span class="tool-icon">$</span> Bash</div>
 <div class="tool-description">Run tests with verbose output</div><div class="truncatable"><div class="truncatable-content"><pre class="bash-command">python -m pytest tests/ -v</pre></div><button class="expand-btn">Show more</button></div>
 </div></div></div>
-<div class="message tool-reply" id="msg-2025-12-24T10-02-10-000Z"><div class="message-header"><span class="role-label">Tool reply</span><a href="#msg-2025-12-24T10-02-10-000Z" class="timestamp-link"><time datetime="2025-12-24T10:02:10.000Z" data-timestamp="2025-12-24T10:02:10.000Z">2025-12-24T10:02:10.000Z</time></a></div><div class="message-content"><div class="tool-result tool-error"><div class="truncatable"><div class="truncatable-content"><pre>Exit code 1
+<div class="message tool-reply" id="msg-2025-12-24T10-02-10-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-02-10-000Z" class="timestamp-link"><time datetime="2025-12-24T10:02:10.000Z" data-timestamp="2025-12-24T10:02:10.000Z">2025-12-24T10:02:10.000Z</time></a></span></div><div class="message-content"><div class="tool-result tool-error"><div class="truncatable"><div class="truncatable-content"><pre>Exit code 1
 ===== FAILURES =====
 test_subtract - AssertionError: expected 5 but got None</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
-<div class="message assistant" id="msg-2025-12-24T10-02-15-000Z"><div class="message-header"><span class="role-label">Assistant</span><a href="#msg-2025-12-24T10-02-15-000Z" class="timestamp-link"><time datetime="2025-12-24T10:02:15.000Z" data-timestamp="2025-12-24T10:02:15.000Z">2025-12-24T10:02:15.000Z</time></a></div><div class="message-content">
-<div class="assistant-text"><p>There's a test failure. I need to check the test file and fix it.</p>
+<div class="message assistant" id="msg-2025-12-24T10-02-15-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-02-15-000Z" class="timestamp-link"><time datetime="2025-12-24T10:02:15.000Z" data-timestamp="2025-12-24T10:02:15.000Z">2025-12-24T10:02:15.000Z</time></a></span></div><div class="message-content">
+<div class="assistant-text" data-markdown="There&#39;s a test failure. I need to check the test file and fix it.
+
+Here&#39;s some **markdown** content with:
+- A bullet list
+- `inline code`
+- A [link](https://example.com)
+
+```python
+def example():
+    return 42
+```"><p>There's a test failure. I need to check the test file and fix it.</p>
 <p>Here's some <strong>markdown</strong> content with:
 - A bullet list
 - <code>inline code</code>
@@ -259,9 +279,9 @@ test_subtract - AssertionError: expected 5 but got None</pre></div><button class
 <pre><code class="language-python">def example():
     return 42
 </code></pre></div></div></div>
-<div class="message user" id="msg-2025-12-24T10-03-00-000Z"><div class="message-header"><span class="role-label">User</span><a href="#msg-2025-12-24T10-03-00-000Z" class="timestamp-link"><time datetime="2025-12-24T10:03:00.000Z" data-timestamp="2025-12-24T10:03:00.000Z">2025-12-24T10:03:00.000Z</time></a></div><div class="message-content">
-<div class="user-content"><p>Fix the issue and commit</p></div></div></div>
-<div class="message assistant" id="msg-2025-12-24T10-03-05-000Z"><div class="message-header"><span class="role-label">Assistant</span><a href="#msg-2025-12-24T10-03-05-000Z" class="timestamp-link"><time datetime="2025-12-24T10:03:05.000Z" data-timestamp="2025-12-24T10:03:05.000Z">2025-12-24T10:03:05.000Z</time></a></div><div class="message-content"><div class="file-tool edit-tool" data-tool-id="toolu_edit_002">
+<div class="message user" id="msg-2025-12-24T10-03-00-000Z"><div class="message-header"><span class="role-label">User</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-03-00-000Z" class="timestamp-link"><time datetime="2025-12-24T10:03:00.000Z" data-timestamp="2025-12-24T10:03:00.000Z">2025-12-24T10:03:00.000Z</time></a></span></div><div class="message-content">
+<div class="user-content" data-markdown="Fix the issue and commit"><p>Fix the issue and commit</p></div></div></div>
+<div class="message assistant" id="msg-2025-12-24T10-03-05-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-03-05-000Z" class="timestamp-link"><time datetime="2025-12-24T10:03:05.000Z" data-timestamp="2025-12-24T10:03:05.000Z">2025-12-24T10:03:05.000Z</time></a></span></div><div class="message-content"><div class="file-tool edit-tool" data-tool-id="toolu_edit_002">
 <div class="file-tool-header edit-header"><span class="file-tool-icon">✏️</span> Edit <span class="file-tool-path">test_math.py</span> <span class="edit-replace-all">(replace all)</span></div>
 <div class="file-tool-fullpath">/project/tests/test_math.py</div>
 <div class="truncatable"><div class="truncatable-content">
@@ -269,17 +289,17 @@ test_subtract - AssertionError: expected 5 but got None</pre></div><button class
 <div class="edit-section edit-new"><div class="edit-label">+</div><pre class="edit-content">assert subtract(10, 5) == 5</pre></div>
 </div><button class="expand-btn">Show more</button></div>
 </div></div></div>
-<div class="message tool-reply" id="msg-2025-12-24T10-03-10-000Z"><div class="message-header"><span class="role-label">Tool reply</span><a href="#msg-2025-12-24T10-03-10-000Z" class="timestamp-link"><time datetime="2025-12-24T10:03:10.000Z" data-timestamp="2025-12-24T10:03:10.000Z">2025-12-24T10:03:10.000Z</time></a></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>File edited successfully</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
-<div class="message assistant" id="msg-2025-12-24T10-03-15-000Z"><div class="message-header"><span class="role-label">Assistant</span><a href="#msg-2025-12-24T10-03-15-000Z" class="timestamp-link"><time datetime="2025-12-24T10:03:15.000Z" data-timestamp="2025-12-24T10:03:15.000Z">2025-12-24T10:03:15.000Z</time></a></div><div class="message-content">
+<div class="message tool-reply" id="msg-2025-12-24T10-03-10-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-03-10-000Z" class="timestamp-link"><time datetime="2025-12-24T10:03:10.000Z" data-timestamp="2025-12-24T10:03:10.000Z">2025-12-24T10:03:10.000Z</time></a></span></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>File edited successfully</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
+<div class="message assistant" id="msg-2025-12-24T10-03-15-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-03-15-000Z" class="timestamp-link"><time datetime="2025-12-24T10:03:15.000Z" data-timestamp="2025-12-24T10:03:15.000Z">2025-12-24T10:03:15.000Z</time></a></span></div><div class="message-content">
 <div class="tool-use bash-tool" data-tool-id="toolu_bash_005">
 <div class="tool-header"><span class="tool-icon">$</span> Bash</div>
 <div class="tool-description">Commit the fix</div><div class="truncatable"><div class="truncatable-content"><pre class="bash-command">git add . &amp;&amp; git commit -m &#39;Add subtract function and fix tests&#39;</pre></div><button class="expand-btn">Show more</button></div>
 </div></div></div>
-<div class="message tool-reply" id="msg-2025-12-24T10-03-20-000Z"><div class="message-header"><span class="role-label">Tool reply</span><a href="#msg-2025-12-24T10-03-20-000Z" class="timestamp-link"><time datetime="2025-12-24T10:03:20.000Z" data-timestamp="2025-12-24T10:03:20.000Z">2025-12-24T10:03:20.000Z</time></a></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><div class="commit-card"><a href="https://github.com/example/project/commit/def5678"><span class="commit-card-hash">def5678</span> Add subtract function and fix tests</a></div><pre>2 files changed, 10 insertions(+), 1 deletion(-)</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
-<div class="message assistant" id="msg-2025-12-24T10-03-25-000Z"><div class="message-header"><span class="role-label">Assistant</span><a href="#msg-2025-12-24T10-03-25-000Z" class="timestamp-link"><time datetime="2025-12-24T10:03:25.000Z" data-timestamp="2025-12-24T10:03:25.000Z">2025-12-24T10:03:25.000Z</time></a></div><div class="message-content">
-<div class="assistant-text"><p>Done! The subtract function is now working and committed.</p></div></div></div><details class="continuation"><summary>Session continuation summary</summary>
-<div class="message user" id="msg-2025-12-24T10-04-00-000Z"><div class="message-header"><span class="role-label">User</span><a href="#msg-2025-12-24T10-04-00-000Z" class="timestamp-link"><time datetime="2025-12-24T10:04:00.000Z" data-timestamp="2025-12-24T10:04:00.000Z">2025-12-24T10:04:00.000Z</time></a></div><div class="message-content">
-<div class="user-content"><p>This is a session continuation summary from a previous context. The user was working on a math utilities library.</p></div></div></div></details>
+<div class="message tool-reply" id="msg-2025-12-24T10-03-20-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-03-20-000Z" class="timestamp-link"><time datetime="2025-12-24T10:03:20.000Z" data-timestamp="2025-12-24T10:03:20.000Z">2025-12-24T10:03:20.000Z</time></a></span></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><div class="commit-card"><a href="https://github.com/example/project/commit/def5678"><span class="commit-card-hash">def5678</span> Add subtract function and fix tests</a></div><pre>2 files changed, 10 insertions(+), 1 deletion(-)</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
+<div class="message assistant" id="msg-2025-12-24T10-03-25-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-03-25-000Z" class="timestamp-link"><time datetime="2025-12-24T10:03:25.000Z" data-timestamp="2025-12-24T10:03:25.000Z">2025-12-24T10:03:25.000Z</time></a></span></div><div class="message-content">
+<div class="assistant-text" data-markdown="Done! The subtract function is now working and committed."><p>Done! The subtract function is now working and committed.</p></div></div></div><details class="continuation"><summary>Session continuation summary</summary>
+<div class="message user" id="msg-2025-12-24T10-04-00-000Z"><div class="message-header"><span class="role-label">User</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-04-00-000Z" class="timestamp-link"><time datetime="2025-12-24T10:04:00.000Z" data-timestamp="2025-12-24T10:04:00.000Z">2025-12-24T10:04:00.000Z</time></a></span></div><div class="message-content">
+<div class="user-content" data-markdown="This is a session continuation summary from a previous context. The user was working on a math utilities library."><p>This is a session continuation summary from a previous context. The user was working on a math utilities library.</p></div></div></div></details>
         
 
 <div class="pagination">
@@ -317,6 +337,71 @@ document.querySelectorAll('.truncatable').forEach(function(wrapper) {
         btn.addEventListener('click', function() {
             if (wrapper.classList.contains('truncated')) { wrapper.classList.remove('truncated'); wrapper.classList.add('expanded'); btn.textContent = 'Show less'; }
             else { wrapper.classList.remove('expanded'); wrapper.classList.add('truncated'); btn.textContent = 'Show more'; }
+        });
+    }
+});
+document.querySelectorAll('.message').forEach(function(msg) {
+    const textBtn = msg.querySelector('.copy-text');
+    const mdBtn = msg.querySelector('.copy-md');
+    if (!textBtn && !mdBtn) return;
+    function flash(btn, ok) {
+        const cls = ok ? 'copied' : 'failed';
+        const original = btn.textContent;
+        btn.classList.add(cls);
+        btn.textContent = ok ? '\u2713' : '\u2717';
+        setTimeout(function() {
+            btn.classList.remove(cls);
+            btn.textContent = original;
+        }, 1200);
+    }
+    function writeClipboard(btn, text) {
+        if (!text) { flash(btn, false); return; }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(
+                function() { flash(btn, true); },
+                function() { flash(btn, false); }
+            );
+            return;
+        }
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            flash(btn, ok);
+        } catch (e) {
+            flash(btn, false);
+        }
+    }
+    if (textBtn) {
+        textBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            const body = msg.querySelector('.message-content');
+            const text = body ? (body.innerText || body.textContent || '').trim() : '';
+            writeClipboard(textBtn, text);
+        });
+    }
+    if (mdBtn) {
+        mdBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            const blocks = [];
+            msg.querySelectorAll('[data-markdown]').forEach(function(el) {
+                const src = el.getAttribute('data-markdown');
+                if (!src) return;
+                if (el.classList.contains('thinking')) {
+                    const quoted = src.split('\n').map(function(line) {
+                        return line.length ? '> ' + line : '>';
+                    }).join('\n');
+                    blocks.push(quoted);
+                } else {
+                    blocks.push(src);
+                }
+            });
+            writeClipboard(mdBtn, blocks.join('\n\n'));
         });
     }
 });

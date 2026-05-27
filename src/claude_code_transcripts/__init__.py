@@ -753,11 +753,13 @@ def render_content_block(block):
         data = source.get("data", "")
         return _macros.image_block(media_type, data)
     elif block_type == "thinking":
-        content_html = render_markdown_text(block.get("thinking", ""))
-        return _macros.thinking(content_html)
+        thinking_text = block.get("thinking", "")
+        content_html = render_markdown_text(thinking_text)
+        return _macros.thinking(content_html, thinking_text)
     elif block_type == "text":
-        content_html = render_markdown_text(block.get("text", ""))
-        return _macros.assistant_text(content_html)
+        text = block.get("text", "")
+        content_html = render_markdown_text(text)
+        return _macros.assistant_text(content_html, text)
     elif block_type == "tool_use":
         tool_name = block.get("name", "Unknown tool")
         tool_input = block.get("input", {})
@@ -845,7 +847,7 @@ def render_user_message_content(message_data):
     if isinstance(content, str):
         if is_json_like(content):
             return _macros.user_content(format_json(content))
-        return _macros.user_content(render_markdown_text(content))
+        return _macros.user_content(render_markdown_text(content), content)
     elif isinstance(content, list):
         return "".join(render_content_block(block) for block in content)
     return f"<p>{html.escape(str(content))}</p>"
@@ -987,6 +989,12 @@ h1 { font-size: 1.5rem; margin-bottom: 24px; padding-bottom: 8px; border-bottom:
 .tool-reply .tool-result { background: transparent; padding: 0; margin: 0; }
 .tool-reply .tool-result .truncatable.truncated::after { background: linear-gradient(to bottom, transparent, #fff8e1); }
 .message-header { display: flex; justify-content: space-between; align-items: center; padding: 8px 16px; background: rgba(0,0,0,0.03); font-size: 0.85rem; }
+.message-header-actions { display: flex; align-items: center; gap: 6px; }
+.copy-btn { background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 0.8rem; line-height: 1; color: var(--text-muted); opacity: 0.55; transition: opacity 0.15s, background 0.15s, color 0.15s; }
+.copy-btn:hover { opacity: 1; background: rgba(0,0,0,0.06); color: var(--text-color); }
+.copy-btn.copied { background: #c8e6c9; color: #1b5e20; opacity: 1; border-color: #81c784; }
+.copy-btn.failed { background: #ffcdd2; color: #b71c1c; opacity: 1; border-color: #ef9a9a; }
+.copy-md { font-family: monospace; font-weight: 600; }
 .role-label { font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
 .user .role-label { color: var(--user-border); }
 time { color: var(--text-muted); font-size: 0.8rem; }
@@ -1136,6 +1144,71 @@ document.querySelectorAll('.truncatable').forEach(function(wrapper) {
         btn.addEventListener('click', function() {
             if (wrapper.classList.contains('truncated')) { wrapper.classList.remove('truncated'); wrapper.classList.add('expanded'); btn.textContent = 'Show less'; }
             else { wrapper.classList.remove('expanded'); wrapper.classList.add('truncated'); btn.textContent = 'Show more'; }
+        });
+    }
+});
+document.querySelectorAll('.message').forEach(function(msg) {
+    const textBtn = msg.querySelector('.copy-text');
+    const mdBtn = msg.querySelector('.copy-md');
+    if (!textBtn && !mdBtn) return;
+    function flash(btn, ok) {
+        const cls = ok ? 'copied' : 'failed';
+        const original = btn.textContent;
+        btn.classList.add(cls);
+        btn.textContent = ok ? '\\u2713' : '\\u2717';
+        setTimeout(function() {
+            btn.classList.remove(cls);
+            btn.textContent = original;
+        }, 1200);
+    }
+    function writeClipboard(btn, text) {
+        if (!text) { flash(btn, false); return; }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(
+                function() { flash(btn, true); },
+                function() { flash(btn, false); }
+            );
+            return;
+        }
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            flash(btn, ok);
+        } catch (e) {
+            flash(btn, false);
+        }
+    }
+    if (textBtn) {
+        textBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            const body = msg.querySelector('.message-content');
+            const text = body ? (body.innerText || body.textContent || '').trim() : '';
+            writeClipboard(textBtn, text);
+        });
+    }
+    if (mdBtn) {
+        mdBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            const blocks = [];
+            msg.querySelectorAll('[data-markdown]').forEach(function(el) {
+                const src = el.getAttribute('data-markdown');
+                if (!src) return;
+                if (el.classList.contains('thinking')) {
+                    const quoted = src.split('\\n').map(function(line) {
+                        return line.length ? '> ' + line : '>';
+                    }).join('\\n');
+                    blocks.push(quoted);
+                } else {
+                    blocks.push(src);
+                }
+            });
+            writeClipboard(mdBtn, blocks.join('\\n\\n'));
         });
     }
 });
