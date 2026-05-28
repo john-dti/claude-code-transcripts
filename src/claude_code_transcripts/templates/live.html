@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{% block title %}Claude Code transcript (live){% endblock %}
+
+{% block content %}
+        <div class="live-header">
+            <h1>Claude Code transcript</h1>
+            <span id="live-status" class="live-status down">● connecting…</span>
+        </div>
+        <p id="stats-bar" class="stats-bar"><span id="stat-prompts">0</span> prompts · <span id="stat-messages">0</span> messages · <span id="stat-tools">0</span> tool calls · <span id="stat-commits">0</span> commits</p>
+        <details class="toc" id="toc" open>
+            <summary>Prompts</summary>
+            <ol id="toc-list"></ol>
+        </details>
+        <div id="messages"></div>
+{%- endblock %}

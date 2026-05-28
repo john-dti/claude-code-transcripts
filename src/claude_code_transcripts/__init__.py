@@ -8,8 +8,10 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import webbrowser
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import click
@@ -181,6 +183,34 @@ def find_local_sessions(folder, limit=10):
     # Sort by modification time, most recent first
     results.sort(key=lambda x: x[0].stat().st_mtime, reverse=True)
     return results[:limit]
+
+
+def resolve_active_session(folder, session=None):
+    """Resolve which session file the live `watch` view should tail.
+
+    If `session` is given, use it directly. Otherwise return the most-recently-
+    modified `.jsonl` under `folder` (the session Claude is actively writing),
+    excluding agent sidechains and warmup sessions. Unlike find_local_sessions
+    we do NOT skip "(no summary)" sessions — a just-started session that has no
+    summary yet must still be tailable. Returns a Path, or None if none found.
+    """
+    if session:
+        return Path(session)
+
+    folder = Path(folder)
+    if not folder.exists():
+        return None
+
+    files = sorted(
+        (f for f in folder.glob("**/*.jsonl") if not f.name.startswith("agent-")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for f in files:
+        if get_session_summary(f).lower() == "warmup":
+            continue
+        return f
+    return None
 
 
 def get_project_display_name(folder_name):
@@ -464,6 +494,33 @@ def parse_session_file(filepath):
             return json.load(f)
 
 
+def _normalize_jsonl_obj(obj):
+    """Normalize one parsed JSONL object to a standard logline entry.
+
+    Returns the entry dict for user/assistant messages, or None for any other
+    entry type (summary, file-history-snapshot, etc.). Shared by the batch
+    parser (_parse_jsonl_file) and the live tail reader (read_new_loglines).
+    """
+    entry_type = obj.get("type")
+
+    # Skip non-message entries
+    if entry_type not in ("user", "assistant"):
+        return None
+
+    # Convert to standard format
+    entry = {
+        "type": entry_type,
+        "timestamp": obj.get("timestamp", ""),
+        "message": obj.get("message", {}),
+    }
+
+    # Preserve isCompactSummary if present
+    if obj.get("isCompactSummary"):
+        entry["isCompactSummary"] = True
+
+    return entry
+
+
 def _parse_jsonl_file(filepath):
     """Parse JSONL file and convert to standard format."""
     loglines = []
@@ -475,28 +532,60 @@ def _parse_jsonl_file(filepath):
                 continue
             try:
                 obj = json.loads(line)
-                entry_type = obj.get("type")
-
-                # Skip non-message entries
-                if entry_type not in ("user", "assistant"):
-                    continue
-
-                # Convert to standard format
-                entry = {
-                    "type": entry_type,
-                    "timestamp": obj.get("timestamp", ""),
-                    "message": obj.get("message", {}),
-                }
-
-                # Preserve isCompactSummary if present
-                if obj.get("isCompactSummary"):
-                    entry["isCompactSummary"] = True
-
-                loglines.append(entry)
             except json.JSONDecodeError:
                 continue
+            entry = _normalize_jsonl_obj(obj)
+            if entry is not None:
+                loglines.append(entry)
 
     return {"loglines": loglines}
+
+
+def read_new_loglines(path, offset):
+    """Read complete JSONL lines appended to `path` after byte `offset`.
+
+    Returns ``(loglines, new_offset)``. Only consumes through the last newline,
+    so a partially-written trailing line is left for a later call. ``new_offset``
+    advances past every complete line, including ones that are blank, malformed,
+    or non-message (so the tail never re-reads them). Splitting on ``b"\\n"`` is
+    UTF-8-safe: 0x0A never appears inside a multibyte sequence.
+    """
+    path = Path(path)
+    with open(path, "rb") as f:
+        f.seek(offset)
+        data = f.read()
+
+    last_nl = data.rfind(b"\n")
+    if last_nl == -1:
+        return [], offset  # no complete line yet
+
+    consumed = data[: last_nl + 1]
+    new_offset = offset + len(consumed)
+
+    loglines = []
+    for raw in consumed.split(b"\n"):
+        if not raw.strip():
+            continue
+        try:
+            line = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        entry = _normalize_jsonl_obj(obj)
+        if entry is not None:
+            loglines.append(entry)
+
+    return loglines, new_offset
+
+
+def format_sse_event(event_name, data):
+    """Frame one Server-Sent Event. JSON-encoding `data` keeps the payload on a
+    single `data:` line (embedded newlines are escaped), so multi-line HTML is
+    SSE-safe by construction."""
+    return f"event: {event_name}\ndata: {json.dumps(data)}\n\n"
 
 
 class CredentialsError(Exception):
@@ -969,6 +1058,400 @@ def render_message(log_type, message_json, timestamp):
         return ""
     msg_id = make_msg_id(timestamp)
     return _macros.message(role_class, role_label, msg_id, timestamp, content_html)
+
+
+def render_logline(entry):
+    """Render one tail logline to a complete `.message` HTML fragment.
+
+    Reuses render_message (the same renderer the static pages use). Returns "" for
+    entries with no visible content so the caller can skip them. Continuation
+    summaries get the same collapsed <details> wrapper as the static output.
+    """
+    message_json = json.dumps(entry.get("message", {}))
+    fragment = render_message(
+        entry.get("type"), message_json, entry.get("timestamp", "")
+    )
+    if not fragment:
+        return ""
+    if entry.get("isCompactSummary"):
+        return _macros.continuation(fragment)
+    return fragment
+
+
+def index_prompt(entry):
+    """If `entry` is a real user prompt (for the live TOC), return (True, preview);
+    otherwise (False, "").
+
+    Mirrors generate_html's timeline predicate: a user message with non-empty
+    text, excluding continuation summaries and "Stop hook feedback:" prompts.
+    """
+    if entry.get("type") != "user" or entry.get("isCompactSummary"):
+        return False, ""
+    text = extract_text_from_content(entry.get("message", {}).get("content", ""))
+    if not text or text.startswith("Stop hook feedback:"):
+        return False, ""
+    preview = " ".join(text.split())
+    if len(preview) > 100:
+        preview = preview[:97] + "..."
+    return True, preview
+
+
+def new_live_stats():
+    """Fresh cumulative-counter state for one SSE connection."""
+    return {"prompts": 0, "messages": 0, "tool_counts": {}, "commits": 0}
+
+
+def accumulate_live_stats(state, entry):
+    """Fold one *shown* logline entry into the running live counters.
+
+    Counts what the live view displays: every rendered message, its tool_use
+    blocks, detected commits, and real user prompts. Reuses analyze_conversation.
+    """
+    state["messages"] += 1
+    delta = analyze_conversation(
+        [
+            (
+                entry.get("type"),
+                json.dumps(entry.get("message", {})),
+                entry.get("timestamp", ""),
+            )
+        ]
+    )
+    for name, count in delta["tool_counts"].items():
+        state["tool_counts"][name] = state["tool_counts"].get(name, 0) + count
+    state["commits"] += len(delta["commits"])
+    is_prompt, _ = index_prompt(entry)
+    if is_prompt:
+        state["prompts"] += 1
+    return state
+
+
+def live_stats_payload(state):
+    """Project live-counter state to the SSE wire dict."""
+    return {
+        "prompts": state["prompts"],
+        "messages": state["messages"],
+        "tool_calls": sum(state["tool_counts"].values()),
+        "commits": state["commits"],
+    }
+
+
+# Extra styles for the live view (status dot, stats bar, table of contents).
+# Appended to the shared CSS so the static output's CSS constant stays untouched.
+LIVE_CSS = """
+.live-header { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px; }
+.live-status { font-size: 0.55rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.live-status.live { color: #2e7d32; }
+.live-status.down { color: var(--text-muted); }
+.stats-bar { color: var(--text-muted); margin: 0 0 20px; }
+.toc { margin-bottom: 24px; border: 1px solid #e0e0e0; border-radius: 8px; background: var(--card-bg); padding: 8px 12px; }
+.toc > summary { cursor: pointer; color: var(--text-muted); font-weight: 600; }
+.toc ol { margin: 8px 0 4px; padding-left: 24px; }
+.toc li { margin: 2px 0; }
+.toc a { color: inherit; text-decoration: none; }
+.toc a:hover { text-decoration: underline; }
+"""
+
+# Client-side script for the live view. The four DOM "enhancers" are refactored
+# from the static JS constant into enhance(root) so they can run on each
+# streamed fragment; the EventSource client appends fragments, builds the TOC,
+# and updates the stats bar. The static JS constant is intentionally left
+# untouched (keeps static-output snapshots stable).
+LIVE_JS = r"""
+(function () {
+  function localizeTimes(root) {
+    root.querySelectorAll('time[data-timestamp]').forEach(function (el) {
+      var ts = el.getAttribute('data-timestamp');
+      var date = new Date(ts);
+      if (isNaN(date.getTime())) return;
+      var now = new Date();
+      var isToday = date.toDateString() === now.toDateString();
+      var timeStr = date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+      el.textContent = isToday ? timeStr : (date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + timeStr);
+    });
+  }
+  function highlightJson(root) {
+    root.querySelectorAll('pre.json').forEach(function (el) {
+      if (el.dataset.hl) return;
+      el.dataset.hl = '1';
+      var text = el.textContent;
+      text = text.replace(/"([^"]+)":/g, '<span style="color: #ce93d8">"$1"</span>:');
+      text = text.replace(/: "([^"]*)"/g, ': <span style="color: #81d4fa">"$1"</span>');
+      text = text.replace(/: (\d+)/g, ': <span style="color: #ffcc80">$1</span>');
+      text = text.replace(/: (true|false|null)/g, ': <span style="color: #f48fb1">$1</span>');
+      el.innerHTML = text;
+    });
+  }
+  function setupTruncation(root) {
+    root.querySelectorAll('.truncatable').forEach(function (wrapper) {
+      if (wrapper.dataset.trunc) return;
+      wrapper.dataset.trunc = '1';
+      var content = wrapper.querySelector('.truncatable-content');
+      var btn = wrapper.querySelector('.expand-btn');
+      if (content && btn && content.scrollHeight > 250) {
+        wrapper.classList.add('truncated');
+        btn.addEventListener('click', function () {
+          if (wrapper.classList.contains('truncated')) { wrapper.classList.remove('truncated'); wrapper.classList.add('expanded'); btn.textContent = 'Show less'; }
+          else { wrapper.classList.remove('expanded'); wrapper.classList.add('truncated'); btn.textContent = 'Show more'; }
+        });
+      }
+    });
+  }
+  function setupCopyButtons(root) {
+    // A streamed fragment's root IS the .message element, so include it as well
+    // as any descendants (querySelectorAll matches descendants only, not root).
+    var msgs = root.matches && root.matches('.message') ? [root] : [];
+    root.querySelectorAll('.message').forEach(function (m) { msgs.push(m); });
+    msgs.forEach(function (msg) {
+      if (msg.dataset.copyBound) return;
+      msg.dataset.copyBound = '1';
+      var textBtn = msg.querySelector('.copy-text');
+      var mdBtn = msg.querySelector('.copy-md');
+      if (!textBtn && !mdBtn) return;
+      function flash(btn, ok) {
+        var cls = ok ? 'copied' : 'failed';
+        var original = btn.textContent;
+        btn.classList.add(cls);
+        btn.textContent = ok ? '✓' : '✗';
+        setTimeout(function () { btn.classList.remove(cls); btn.textContent = original; }, 1200);
+      }
+      function writeClipboard(btn, text) {
+        if (!text) { flash(btn, false); return; }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function () { flash(btn, true); }, function () { flash(btn, false); });
+          return;
+        }
+        try {
+          var ta = document.createElement('textarea');
+          ta.value = text; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+          document.body.appendChild(ta); ta.select();
+          var ok = document.execCommand('copy'); document.body.removeChild(ta); flash(btn, ok);
+        } catch (e) { flash(btn, false); }
+      }
+      if (textBtn) {
+        textBtn.addEventListener('click', function (e) {
+          e.preventDefault();
+          var body = msg.querySelector('.message-content');
+          var text = body ? (body.innerText || body.textContent || '').trim() : '';
+          writeClipboard(textBtn, text);
+        });
+      }
+      if (mdBtn) {
+        mdBtn.addEventListener('click', function (e) {
+          e.preventDefault();
+          var blocks = [];
+          msg.querySelectorAll('[data-markdown]').forEach(function (el) {
+            var src = el.getAttribute('data-markdown');
+            if (!src) return;
+            if (el.classList.contains('thinking')) {
+              var quoted = src.split('\n').map(function (line) { return line.length ? '> ' + line : '>'; }).join('\n');
+              blocks.push(quoted);
+            } else { blocks.push(src); }
+          });
+          writeClipboard(mdBtn, blocks.join('\n\n'));
+        });
+      }
+    });
+  }
+  function enhance(root) {
+    localizeTimes(root);
+    highlightJson(root);
+    setupTruncation(root);
+    setupCopyButtons(root);
+  }
+
+  var messages = document.getElementById('messages');
+  var tocList = document.getElementById('toc-list');
+  var statusEl = document.getElementById('live-status');
+
+  function nearBottom() {
+    return (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 120);
+  }
+  function setStatus(live) {
+    if (!statusEl) return;
+    statusEl.textContent = live ? '● live' : '● reconnecting…';
+    statusEl.className = 'live-status ' + (live ? 'live' : 'down');
+  }
+  function setCount(id, n) { var el = document.getElementById(id); if (el) el.textContent = n; }
+
+  var es = new EventSource('/events');
+  es.addEventListener('open', function () { setStatus(true); });
+  es.addEventListener('error', function () { setStatus(false); });
+
+  es.addEventListener('reset', function () {
+    if (messages) messages.innerHTML = '';
+    if (tocList) tocList.innerHTML = '';
+    setCount('stat-prompts', 0); setCount('stat-messages', 0); setCount('stat-tools', 0); setCount('stat-commits', 0);
+  });
+  es.addEventListener('append', function (e) {
+    var payload = JSON.parse(e.data);
+    var stick = nearBottom();
+    var tpl = document.createElement('template');
+    tpl.innerHTML = payload.html;
+    var node = tpl.content.firstElementChild;
+    if (!node || !messages) return;
+    messages.appendChild(node);
+    enhance(node);
+    if (stick) window.scrollTo(0, document.body.scrollHeight);
+  });
+  es.addEventListener('prompt', function (e) {
+    var p = JSON.parse(e.data);
+    if (!tocList) return;
+    var li = document.createElement('li');
+    var a = document.createElement('a');
+    a.href = '#' + p.id;
+    a.textContent = '#' + p.num + '  ' + p.preview; // textContent: preview never parsed as HTML
+    li.appendChild(a);
+    tocList.appendChild(li);
+  });
+  es.addEventListener('stats', function (e) {
+    var s = JSON.parse(e.data);
+    setCount('stat-prompts', s.prompts);
+    setCount('stat-messages', s.messages);
+    setCount('stat-tools', s.tool_calls);
+    setCount('stat-commits', s.commits);
+  });
+})();
+"""
+
+
+class _LiveServer(ThreadingHTTPServer):
+    """Threaded HTTP server that tails one session file. One handler thread per
+    connected browser tab; daemon threads so Ctrl-C/shutdown never hangs."""
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, server_address, handler, session_file, repo, poll_interval):
+        super().__init__(server_address, handler)
+        self.session_file = Path(session_file)
+        self.repo = repo
+        self.poll_interval = poll_interval
+        self.stop_event = threading.Event()
+
+    def shutdown(self):
+        # Signal handler poll-loops to exit first, then stop serve_forever.
+        # MUST be called from a different thread than serve_forever().
+        self.stop_event.set()
+        super().shutdown()
+
+
+class _LiveHandler(BaseHTTPRequestHandler):
+    """Serves the live shell at `/` and a Server-Sent Events tail at `/events`."""
+
+    def log_message(self, format, *args):  # noqa: A002 - keep the CLI output clean
+        pass
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/":
+            self._serve_shell()
+        elif path == "/events":
+            self._serve_events()
+        else:
+            self.send_error(404)
+
+    def _serve_shell(self):
+        body = (
+            get_template("live.html")
+            .render(css=CSS + LIVE_CSS, js=LIVE_JS)
+            .encode("utf-8")
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _sse_write(self, text):
+        self.wfile.write(text.encode("utf-8"))
+        self.wfile.flush()
+
+    def _serve_events(self):
+        server = self.server
+        # render_message -> ... -> commit_card reads this module global for commit
+        # links. `watch` bypasses generate_html (where it's normally set), so set
+        # it here from the repo resolved once at server construction.
+        global _github_repo
+        _github_repo = server.repo
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        stop_event = server.stop_event
+        path = server.session_file
+        poll = server.poll_interval
+        try:
+            self._sse_write(format_sse_event("reset", {}))
+            offset = 0
+            state = new_live_stats()
+            while not stop_event.is_set():
+                if not path.exists():
+                    if stop_event.wait(poll):
+                        break
+                    continue
+                if path.stat().st_size < offset:
+                    # File truncated/compacted: re-sync from the top.
+                    self._sse_write(format_sse_event("reset", {}))
+                    offset = 0
+                    state = new_live_stats()
+                loglines, offset = read_new_loglines(path, offset)
+                changed = False
+                for entry in loglines:
+                    fragment = render_logline(entry)
+                    if not fragment:
+                        continue
+                    self._sse_write(format_sse_event("append", {"html": str(fragment)}))
+                    accumulate_live_stats(state, entry)
+                    is_prompt, preview = index_prompt(entry)
+                    if is_prompt:
+                        ts = entry.get("timestamp", "")
+                        self._sse_write(
+                            format_sse_event(
+                                "prompt",
+                                {
+                                    "id": make_msg_id(ts),
+                                    "num": state["prompts"],
+                                    "preview": preview,
+                                    "timestamp": ts,
+                                },
+                            )
+                        )
+                    changed = True
+                if changed:
+                    self._sse_write(
+                        format_sse_event("stats", live_stats_payload(state))
+                    )
+                self._sse_write(": keepalive\n\n")
+                if stop_event.wait(poll):
+                    break
+        except (BrokenPipeError, ConnectionError, OSError):
+            pass  # client disconnected; end this handler thread
+
+
+def create_live_server(
+    session_file, host="127.0.0.1", port=0, repo=None, poll_interval=0.3
+):
+    """Build (but do not start) a live-tail HTTP server for `session_file`.
+
+    Binds immediately to ``host:port`` (use port 0 for an ephemeral port; read
+    the real port from ``server.server_address``). Resolves the GitHub repo once
+    for commit links unless one is supplied. Start with ``serve_forever()`` and
+    stop with ``shutdown()`` then ``server_close()``. Does NOT open a browser —
+    that stays in the command layer so tests never spawn one.
+    """
+    session_file = Path(session_file)
+    if repo is None and session_file.exists():
+        try:
+            repo = detect_github_repo(
+                parse_session_file(session_file).get("loglines", [])
+            )
+        except Exception:
+            repo = None
+    return _LiveServer((host, port), _LiveHandler, session_file, repo, poll_interval)
 
 
 CSS = """
@@ -1592,6 +2075,100 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
     if open_browser or auto_open:
         index_url = (output / "index.html").resolve().as_uri()
         webbrowser.open(index_url)
+
+
+@cli.command("watch")
+@click.option(
+    "--session",
+    type=click.Path(),
+    help="Tail a specific session file instead of the newest.",
+)
+@click.option(
+    "--pick",
+    is_flag=True,
+    help="Choose the session from a list instead of auto-selecting the newest.",
+)
+@click.option(
+    "-s",
+    "--source",
+    type=click.Path(),
+    help="Projects folder to search (default: ~/.claude/projects).",
+)
+@click.option(
+    "--port",
+    default=0,
+    help="Port to serve on (default: an OS-assigned free port).",
+)
+@click.option(
+    "--repo",
+    help="GitHub repo (owner/name) for commit links. Auto-detected if omitted.",
+)
+@click.option(
+    "--open/--no-open",
+    "open_browser",
+    default=True,
+    help="Open the live view in your browser (default: yes).",
+)
+@click.option(
+    "--poll-interval",
+    default=0.3,
+    help="Seconds between file polls (default: 0.3).",
+)
+def watch_cmd(session, pick, source, port, repo, open_browser, poll_interval):
+    """Tail an active Claude Code session live in your browser.
+
+    Starts a local server and streams the session to the browser as Claude
+    writes it. With no options it tails the most-recently-modified session.
+    """
+    projects_folder = Path(source) if source else (Path.home() / ".claude" / "projects")
+
+    if pick and not session:
+        results = find_local_sessions(projects_folder)
+        if not results:
+            click.echo("No local sessions found.")
+            return
+        choices = []
+        for filepath, summary in results:
+            stat = filepath.stat()
+            mod_time = datetime.fromtimestamp(stat.st_mtime)
+            size_kb = stat.st_size / 1024
+            date_str = mod_time.strftime("%Y-%m-%d %H:%M")
+            if len(summary) > 50:
+                summary = summary[:47] + "..."
+            display = f"{date_str}  {size_kb:5.0f} KB  {summary}"
+            choices.append(questionary.Choice(title=display, value=filepath))
+        session_file = questionary.select(
+            "Select a session to watch:", choices=choices
+        ).ask()
+        if session_file is None:
+            click.echo("No session selected.")
+            return
+    else:
+        session_file = resolve_active_session(projects_folder, session=session)
+
+    if session_file is None:
+        click.echo("No active session found to watch.")
+        return
+    session_file = Path(session_file)
+    if not session_file.exists():
+        click.echo(f"Session file not found: {session_file}")
+        return
+
+    server = create_live_server(
+        session_file, port=port, repo=repo, poll_interval=poll_interval
+    )
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    click.echo(f"Watching {session_file}")
+    click.echo(f"Live at {url}  (press Ctrl-C to stop)")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        click.echo("\nStopping…")
+    finally:
+        server.stop_event.set()
+        server.server_close()
 
 
 def is_url(path):
