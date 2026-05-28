@@ -30,9 +30,10 @@ uvx claude-code-transcripts --help
 
 This tool converts Claude Code session files into browseable multi-page HTML transcripts.
 
-There are four commands available:
+There are five commands available:
 
 - `local` (default) - select from local Claude Code sessions stored in `~/.claude/projects`
+- `watch` - live-tail an active session into the browser as Claude writes it
 - `web` - select from web sessions via the Claude API
 - `json` - convert a specific JSON or JSONL session file
 - `all` - convert all local sessions to a browsable HTML archive
@@ -47,7 +48,7 @@ This shows an interactive picker to select a session, generates HTML, and opens 
 
 ### Output options
 
-All commands support these options:
+The `local`, `web`, `json`, and `all` commands write HTML files and support these options (the `watch` command is a live server instead — see [Live tailing](#live-tailing)):
 
 - `-o, --output DIRECTORY` - output directory (default: writes to temp dir and opens browser)
 - `-a, --output-auto` - auto-name output subdirectory based on session ID or filename
@@ -75,6 +76,37 @@ Use `--limit` to control how many sessions are shown (default: 10):
 ```bash
 claude-code-transcripts local --limit 20
 ```
+
+### Live tailing
+
+The `watch` command streams an **in-progress** session into your browser in real time — a `tail -f` with the same rich rendering as the static pages. It starts a small local server, opens your browser, and pushes each new message (via [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)) as Claude appends it to the session file. A running stats bar (prompts, messages, tool calls, commits) and a clickable list of prompts update live as the session grows.
+
+```bash
+# Tail the most-recently-modified session (the one you're actively working in)
+claude-code-transcripts watch
+```
+
+By default it picks the newest session under `~/.claude/projects`. Other ways to choose:
+
+```bash
+# Choose from a list instead of auto-selecting the newest
+claude-code-transcripts watch --pick
+
+# Tail a specific session file
+claude-code-transcripts watch --session ~/.claude/projects/my-project/abc123.jsonl
+```
+
+Options:
+
+- `--session PATH` - tail a specific session file instead of the newest
+- `--pick` - choose the session from a list instead of auto-selecting the newest
+- `-s, --source DIRECTORY` - projects folder to search (default: `~/.claude/projects`)
+- `--port N` - port to serve on (default: an OS-assigned free port)
+- `--repo OWNER/NAME` - GitHub repo for commit links (auto-detected if not specified)
+- `--open` / `--no-open` - open the live view in your browser (default: open)
+- `--poll-interval SECONDS` - how often to check the file for new lines (default: 0.3)
+
+Press `Ctrl-C` to stop the server. The page reconnects automatically and re-syncs if the session file is rewritten (for example when Claude compacts it).
 
 ### Web sessions
 
