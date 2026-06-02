@@ -1,5 +1,6 @@
 """Tests for batch conversion functionality."""
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -216,6 +217,37 @@ class TestFindAllSessions:
         names = [s["path"].name for s in result[0]["sessions"]]
         assert names == ["ddd.jsonl", "bbb.jsonl", "ccc.jsonl", "aaa.jsonl"]
 
+    def test_session_includes_branch(self, tmp_path):
+        """Each session dict carries the gitBranch so the archive can disambiguate."""
+        proj = tmp_path / "-home-user-projects-proj"
+        proj.mkdir(parents=True)
+        (proj / "s.jsonl").write_text(
+            '{"type":"user","timestamp":"2025-01-01T00:00:00Z","gitBranch":"dti/watch",'
+            '"message":{"role":"user","content":"do something useful"}}\n',
+            encoding="utf-8",
+        )
+        session = find_all_sessions(tmp_path)[0]["sessions"][0]
+        assert session["branch"] == "dti/watch"
+
+    def test_session_includes_command(self, tmp_path):
+        """Each session dict carries the originating slash command; summary is the body."""
+        proj = tmp_path / "-home-user-projects-proj"
+        proj.mkdir(parents=True)
+        content = (
+            "<command-message>morningly</command-message>\n"
+            "<command-name>/morningly</command-name>\n"
+            "<command-args>greet the day</command-args>"
+        )
+        entry = {
+            "type": "user",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "message": {"role": "user", "content": content},
+        }
+        (proj / "s.jsonl").write_text(json.dumps(entry) + "\n", encoding="utf-8")
+        session = find_all_sessions(tmp_path)[0]["sessions"][0]
+        assert session["command"] == "/morningly"
+        assert session["summary"] == "greet the day"
+
     def test_includes_slash_command_only_sessions(self, tmp_path):
         """Sessions whose first user message is a slash command must not be dropped.
 
@@ -309,6 +341,34 @@ class TestGenerateBatchHtml:
         # Should contain links to session directories
         assert "abc123" in project_a_index
         assert "def456" in project_a_index
+
+    def test_project_index_shows_branch_and_command(self, tmp_path):
+        """Project index surfaces gitBranch and the originating slash command so
+        otherwise-identical sessions (e.g. repeated /security-review runs) are
+        distinguishable in the archive."""
+        source = tmp_path / "projects"
+        proj = source / "-home-user-projects-widget"
+        proj.mkdir(parents=True)
+        content = (
+            "<command-message>plan</command-message>\n"
+            "<command-name>/plan</command-name>\n"
+            "<command-args>build the widget</command-args>"
+        )
+        entry = {
+            "type": "user",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "gitBranch": "dti/integration",
+            "message": {"role": "user", "content": content},
+        }
+        (proj / "s.jsonl").write_text(json.dumps(entry) + "\n", encoding="utf-8")
+
+        output = tmp_path / "out"
+        generate_batch_html(source, output)
+
+        project_index = (output / "widget" / "index.html").read_text()
+        assert "dti/integration" in project_index
+        assert "/plan" in project_index
+        assert "build the widget" in project_index
 
     def test_returns_statistics(self, mock_projects_dir, output_dir):
         """Test that batch generation returns statistics."""
