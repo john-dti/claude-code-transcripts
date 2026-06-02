@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import webbrowser
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -79,27 +80,216 @@ _COMMAND_NAME_RE = re.compile(r"<command-name>([^<]*)</command-name>")
 _COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
 
 
-def extract_command_summary(text):
-    """Return a readable summary for slash-command user messages, else None.
+# Slash commands that toggle UI/config or manage the session shell rather than
+# describing the work. When one is the first user message we keep scanning for
+# the real task command (e.g. /plan), but fall back to it if it is the ONLY
+# content — so a /clear-only session still gets a title instead of being dropped
+# as "(no summary)". Tune freely; task/skill commands (/plan, /security-review,
+# /deep-research, /morningly, /init, /review) are deliberately absent because
+# their args carry the session's intent.
+_CONTROL_COMMANDS = frozenset(
+    {
+        "/effort",
+        "/model",
+        "/clear",
+        "/config",
+        "/cost",
+        "/status",
+        "/compact",
+        "/output-style",
+        "/fast",
+        "/resume",
+        "/doctor",
+        "/login",
+        "/logout",
+        "/help",
+        "/permissions",
+        "/memory",
+        "/hooks",
+        "/mcp",
+        "/agents",
+        "/ide",
+        "/vim",
+        "/terminal-setup",
+        "/bug",
+    }
+)
+
+
+def _parse_command(text):
+    """Return (command_name, args_body) for a slash-command wrapper, else (None, "").
 
     Claude Code records user-typed slash commands as text content shaped like:
-        <command-message>morningly</command-message>
-        <command-name>/morningly</command-name>
+        <command-message>plan</command-message>
+        <command-name>/plan</command-name>
         <command-args>...actual prompt body...</command-args>
-    The leading `<` would otherwise cause callers to skip the message and
-    treat the session as having no summary — silently dropping it from
-    `all`/`local` listings. Prefer the args (the real prompt); fall back to
-    just the command name when the slash command was run with no args.
     """
     if "<command-name>" not in text and "<command-message>" not in text:
-        return None
+        return None, ""
     name_match = _COMMAND_NAME_RE.search(text)
     args_match = _COMMAND_ARGS_RE.search(text)
-    args_text = args_match.group(1).strip() if args_match else ""
-    name_text = name_match.group(1).strip() if name_match else ""
-    if args_text and name_text:
-        return f"{name_text}: {args_text}"
-    return args_text or name_text or None
+    name = name_match.group(1).strip() if name_match else None
+    args = args_match.group(1).strip() if args_match else ""
+    return name, args
+
+
+def _is_control_command(name):
+    """True if `name` is a non-demarcating UI/config slash command."""
+    if not name:
+        return False
+    normalized = name.strip().lower()
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    return normalized in _CONTROL_COMMANDS
+
+
+def _truncate(text, max_length):
+    """Trim `text` to max_length, appending an ellipsis when shortened."""
+    if len(text) > max_length:
+        return text[: max_length - 3] + "..."
+    return text
+
+
+def extract_command_summary(text):
+    """Return a readable "name: args" summary for slash-command messages, else None.
+
+    Retained for backward compatibility; the picker/HTML paths now use
+    scan_session_metadata, which keeps the command name and args body separate.
+    """
+    name, args = _parse_command(text)
+    if name is None and not args:
+        return None
+    if args and name:
+        return f"{name}: {args}"
+    return args or name or None
+
+
+@dataclass
+class SessionMetadata:
+    """What a session picker / archive row needs to identify a session.
+
+    summary: best human title (args body, prose, or command name); "(no summary)"
+        if nothing usable was found.
+    branch: gitBranch from the first entry that carries one, or None.
+    command: originating slash command (e.g. "/plan"), or None for prose sessions.
+    from_control_fallback: True when `summary` is only a skipped control command
+        (e.g. a /clear-only session) — lets callers avoid double-printing it.
+    """
+
+    summary: str
+    branch: str | None
+    command: str | None
+    from_control_fallback: bool
+
+
+def scan_session_metadata(filepath, max_length=200):
+    """Extract a session's title, git branch, and originating slash command.
+
+    Single pass over the JSONL. Title precedence:
+      1. an explicit ``type=="summary"`` line (Claude Code's own title)
+      2. the first non-meta user message that carries intent — skipping
+         control/UI slash commands (``_CONTROL_COMMANDS``) so the real task
+         command wins over a leading ``/effort``/``/clear`` toggle
+      3. a skipped control command, if it was the only content (fallback)
+
+    The summary holds the command *args body* (the real prose); the command name
+    is returned separately so callers can surface it in its own column.
+    """
+    filepath = Path(filepath)
+    explicit_summary = None
+    chosen_summary = None
+    chosen_command = None
+    control_fallback = None  # (name, body) of the first skipped control command
+    branch = None
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if branch is None and obj.get("gitBranch"):
+                    branch = obj["gitBranch"]
+
+                if (
+                    explicit_summary is None
+                    and obj.get("type") == "summary"
+                    and obj.get("summary")
+                ):
+                    explicit_summary = obj["summary"]
+                    continue
+
+                if (
+                    chosen_summary is None
+                    and obj.get("type") == "user"
+                    and not obj.get("isMeta")
+                    and obj.get("message", {}).get("content")
+                ):
+                    text = extract_text_from_content(obj["message"]["content"])
+                    if not text:
+                        continue
+                    if text.startswith("<"):
+                        name, body = _parse_command(text)
+                        if name is None and not body:
+                            # non-command wrapper (<system-reminder>, stdout) — skip
+                            continue
+                        if _is_control_command(name):
+                            if control_fallback is None:
+                                control_fallback = (name, body)
+                            continue  # keep scanning for the real task command
+                        chosen_summary = body or name
+                        chosen_command = name
+                    else:
+                        chosen_summary = text
+                        chosen_command = None
+    except Exception:
+        pass
+
+    from_control_fallback = False
+    if explicit_summary is not None:
+        summary = explicit_summary
+    elif chosen_summary is not None:
+        summary = chosen_summary
+    elif control_fallback is not None:
+        chosen_command = control_fallback[0]
+        summary = control_fallback[1] or control_fallback[0]
+        from_control_fallback = True
+    else:
+        summary = "(no summary)"
+        chosen_command = None
+
+    return SessionMetadata(
+        summary=_truncate(summary, max_length),
+        branch=branch,
+        command=chosen_command,
+        from_control_fallback=from_control_fallback,
+    )
+
+
+def format_session_choice(meta, mtime, size_bytes, project, summary_width=44):
+    """Build one aligned picker row: date · size · [branch] · project · command · summary.
+
+    The `local` and `watch --pick` pickers glob across ALL projects, so each row
+    needs branch + project + command to be distinguishable (e.g. eight identical
+    `/security-review` runs separated only by branch). When the summary would just
+    repeat the command column (a bare `/clear` with no args) it is blanked so the
+    command isn't printed twice; a command that carries a body keeps its body.
+    """
+    date_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+    size_kb = size_bytes / 1024
+    branch = f"[{_truncate(meta.branch, 18)}]" if meta.branch else ""
+    cmd = _truncate(meta.command, 16) if meta.command else ""
+    if meta.command and meta.summary == meta.command:
+        summary = ""  # would duplicate the command column
+    else:
+        summary = _truncate(meta.summary, summary_width)
+    proj = _truncate(project or "", 28)
+    return f"{date_str}  {size_kb:5.0f} KB  {branch:<20} {proj:<28} {cmd:<16} {summary}".rstrip()
 
 
 # Module-level variable for GitHub repo (set by generate_html)
@@ -117,78 +307,23 @@ def get_session_summary(filepath, max_length=200):
     Returns a summary string or "(no summary)" if none found.
     """
     filepath = Path(filepath)
+    if filepath.suffix == ".jsonl":
+        return scan_session_metadata(filepath, max_length).summary
     try:
-        if filepath.suffix == ".jsonl":
-            return _get_jsonl_summary(filepath, max_length)
-        else:
-            # For JSON files, try to get first user message
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            loglines = data.get("loglines", [])
-            for entry in loglines:
-                if entry.get("type") == "user":
-                    msg = entry.get("message", {})
-                    content = msg.get("content", "")
-                    text = extract_text_from_content(content)
-                    if text:
-                        if len(text) > max_length:
-                            return text[: max_length - 3] + "..."
-                        return text
-            return "(no summary)"
+        # For JSON files, try to get first user message
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        loglines = data.get("loglines", [])
+        for entry in loglines:
+            if entry.get("type") == "user":
+                msg = entry.get("message", {})
+                content = msg.get("content", "")
+                text = extract_text_from_content(content)
+                if text:
+                    return _truncate(text, max_length)
+        return "(no summary)"
     except Exception:
         return "(no summary)"
-
-
-def _get_jsonl_summary(filepath, max_length=200):
-    """Extract summary from JSONL file."""
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    # First priority: summary type entries
-                    if obj.get("type") == "summary" and obj.get("summary"):
-                        summary = obj["summary"]
-                        if len(summary) > max_length:
-                            return summary[: max_length - 3] + "..."
-                        return summary
-                except json.JSONDecodeError:
-                    continue
-
-        # Second pass: find first non-meta user message
-        with open(filepath, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if (
-                        obj.get("type") == "user"
-                        and not obj.get("isMeta")
-                        and obj.get("message", {}).get("content")
-                    ):
-                        content = obj["message"]["content"]
-                        text = extract_text_from_content(content)
-                        if not text:
-                            continue
-                        if text.startswith("<"):
-                            cmd_summary = extract_command_summary(text)
-                            if not cmd_summary:
-                                continue
-                            text = cmd_summary
-                        if len(text) > max_length:
-                            return text[: max_length - 3] + "..."
-                        return text
-                except json.JSONDecodeError:
-                    continue
-    except Exception:
-        pass
-
-    return "(no summary)"
 
 
 def find_local_sessions(folder, limit=10):
@@ -297,9 +432,9 @@ def find_all_sessions(folder, include_agents=False):
         if not include_agents and session_file.name.startswith("agent-"):
             continue
 
-        # Get summary and skip boring sessions
-        summary = get_session_summary(session_file)
-        if summary.lower() == "warmup" or summary == "(no summary)":
+        # Get metadata and skip boring sessions
+        meta = scan_session_metadata(session_file)
+        if meta.summary.lower() == "warmup" or meta.summary == "(no summary)":
             continue
 
         # Get project folder
@@ -317,7 +452,9 @@ def find_all_sessions(folder, include_agents=False):
         projects[project_key]["sessions"].append(
             {
                 "path": session_file,
-                "summary": summary,
+                "summary": meta.summary,
+                "branch": meta.branch,
+                "command": meta.command,
                 "mtime": stat.st_mtime,
                 "size": stat.st_size,
             }
@@ -425,6 +562,8 @@ def _generate_project_index(project, output_dir):
             {
                 "name": session["path"].stem,
                 "summary": session["summary"],
+                "branch": session.get("branch"),
+                "command": session.get("command"),
                 "date": mod_time.strftime("%Y-%m-%d %H:%M"),
                 "size_kb": session["size"] / 1024,
             }
@@ -1569,13 +1708,9 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
     choices = []
     for filepath, summary in results:
         stat = filepath.stat()
-        mod_time = datetime.fromtimestamp(stat.st_mtime)
-        size_kb = stat.st_size / 1024
-        date_str = mod_time.strftime("%Y-%m-%d %H:%M")
-        # Truncate summary if too long
-        if len(summary) > 50:
-            summary = summary[:47] + "..."
-        display = f"{date_str}  {size_kb:5.0f} KB  {summary}"
+        meta = scan_session_metadata(filepath)
+        project = get_project_display_name(filepath.parent.name)
+        display = format_session_choice(meta, stat.st_mtime, stat.st_size, project)
         choices.append(questionary.Choice(title=display, value=filepath))
 
     selected = questionary.select(

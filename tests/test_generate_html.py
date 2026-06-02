@@ -26,6 +26,7 @@ from claude_code_transcripts import (
     GIST_PREVIEW_JS,
     parse_session_file,
     get_session_summary,
+    scan_session_metadata,
     find_local_sessions,
 )
 
@@ -1233,6 +1234,28 @@ class TestGetSessionSummary:
         )
         summary = get_session_summary(jsonl_file)
         assert summary == "actual user prompt"
+
+    def test_wrapper_equals_metadata_summary(self, tmp_path):
+        """get_session_summary is a thin wrapper over scan_session_metadata().summary.
+
+        Guards the refactor invariant: the string API must keep returning exactly
+        the metadata object's summary for JSONL sessions.
+        """
+        jsonl_file = tmp_path / "wrap.jsonl"
+        jsonl_file.write_text(
+            '{"type":"user","timestamp":"2026-05-27T14:49:26Z",'
+            '"gitBranch":"dti/integration","message":'
+            '{"role":"user","content":'
+            '"<command-message>plan</command-message>\\n'
+            "<command-name>/plan</command-name>\\n"
+            '<command-args>do the precise thing</command-args>"'
+            "}}\n",
+            encoding="utf-8",
+        )
+        assert (
+            get_session_summary(jsonl_file) == scan_session_metadata(jsonl_file).summary
+        )
+        assert get_session_summary(jsonl_file) == "do the precise thing"
 
 
 class TestFindLocalSessions:
