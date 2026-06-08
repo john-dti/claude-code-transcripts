@@ -134,6 +134,75 @@ class TestRenderFunctions:
         assert render_markdown_text("") == ""
         assert render_markdown_text(None) == ""
 
+    def test_render_markdown_nested_bullets_under_numbered_list(self):
+        """Claude compaction summaries use 3-space-indented bullets nested
+        under numbered items, with the list starting on the line right after a
+        header (no blank line). CommonMark nests these correctly; the legacy
+        python-markdown renderer absorbed item 1 into a paragraph and flattened
+        the sub-bullets into the parent ``<ol>``. See msg
+        2026-06-08T14:32:41.657Z in the compass catalog-pricebook archive."""
+        source = (
+            "Summary:\n"
+            "1. Primary Request and Intent:\n"
+            "   The user is driving the workstream.\n"
+            "   - **(Msg 1)** First request.\n"
+            "   - **(Msg 2)** Second request.\n"
+            "\n"
+            "2. Key Technical Concepts:\n"
+            "   - Facet grade model.\n"
+            "   - Grade rule.\n"
+        )
+        result = render_markdown_text(source)
+
+        # Sub-bullets must nest as an unordered list, not flatten into the <ol>.
+        assert "<ul>" in result
+        # The leading "1." must be consumed as a list marker, never rendered as
+        # literal paragraph text (the symptom of the absorbed-into-<p> bug).
+        assert "1. Primary Request" not in result
+        # Both numbered items survive as ordered-list entries.
+        assert "<ol>" in result
+        assert "Primary Request and Intent" in result
+        assert "Key Technical Concepts" in result
+
+    def test_render_markdown_table_unescaped_pipe_in_code_span(self):
+        """A shell command with an unescaped ``|`` inside an inline code span in
+        a GFM table cell must stay one atomic ``<code>`` cell. Per GFM the pipe
+        should be ``\\|``-escaped, but Claude transcripts routinely contain bare
+        pipes (e.g. ``| `a | b` |`` comparison tables of shell commands), and
+        the strict GFM parser would otherwise split the code span across two
+        broken cells with leaked backticks."""
+        source = "| Cmd | Note |\n| --- | --- |\n| `grep a|b file` | searches |\n"
+        result = render_markdown_text(source)
+
+        # The code span survives intact as a single rendered pipe, one cell.
+        assert "<code>grep a|b file</code>" in result
+        # No leaked backtick text and no shattered extra cell.
+        assert "`grep a" not in result
+        assert "<td>b file" not in result
+
+    def test_render_markdown_table_multiple_pipes_in_code_span(self):
+        """Multiple bare pipes inside one table-cell code span all survive."""
+        source = "| Pipeline | N |\n| --- | --- |\n| `a | b | c` | 3 |\n"
+        result = render_markdown_text(source)
+        assert "<code>a | b | c</code>" in result
+
+    def test_render_markdown_table_already_escaped_pipe_not_doubled(self):
+        """An already ``\\|``-escaped pipe in a table code span renders as a
+        single literal pipe (no double-escaping introduced by preprocessing)."""
+        source = "| Cmd | Note |\n| --- | --- |\n| `grep a\\|b` | x |\n"
+        result = render_markdown_text(source)
+        assert "<code>grep a|b</code>" in result
+        assert "a\\|b" not in result
+
+    def test_render_markdown_prose_code_span_pipe_untouched(self):
+        """SAFETY: a code span with a pipe in ordinary prose (NOT a table) must
+        be left exactly alone — the table-pipe fix must never leak a backslash
+        into a non-table code span."""
+        source = "Run `ps aux | grep python` to list processes."
+        result = render_markdown_text(source)
+        assert "<code>ps aux | grep python</code>" in result
+        assert "\\|" not in result
+
     def test_format_json(self, snapshot_html):
         """Test JSON formatting."""
         result = format_json({"key": "value", "number": 42, "nested": {"a": 1}})

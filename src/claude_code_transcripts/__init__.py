@@ -19,7 +19,7 @@ import click
 from click_default_group import DefaultGroup
 import httpx
 from jinja2 import Environment, PackageLoader
-import markdown
+from markdown_it import MarkdownIt
 import questionary
 
 # Set up Jinja2 environment
@@ -1085,10 +1085,100 @@ def format_json(obj):
         return f"<pre>{html.escape(str(obj))}</pre>"
 
 
+# CommonMark-compliant renderer. Claude emits CommonMark/GFM, so its
+# compaction summaries indent nested bullets 3 spaces (aligned past the "1. "
+# marker) and start lists on the line right after a header. The legacy
+# python-markdown engine mis-parsed both (4-space nesting rule + no
+# list-interrupts-paragraph), flattening sub-bullets into the parent <ol> and
+# absorbing the first item into a <p>. The "commonmark" preset keeps raw-HTML
+# passthrough (html=True) to match the old behavior; ``table`` restores the GFM
+# tables that the old ``tables`` extension provided (fenced code is built in).
+_md = MarkdownIt("commonmark").enable("table")
+
+# A GFM table delimiter row, e.g. "| --- | :--: |" or "---|---". Used only to
+# detect which lines are table rows so we can scope the pipe-escaping fix below.
+_TABLE_DELIMITER_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$")
+# An unescaped "|" (not already preceded by a backslash).
+_UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
+
+
+def _escape_pipes_in_code_spans(line):
+    """Escape unescaped ``|`` that fall inside inline code spans on a single
+    table-row line, so the GFM table parser doesn't split a cell mid-code-span.
+    markdown-it unescapes ``\\|`` back to ``|`` inside code spans *in table
+    cells*, so this is a no-op on the rendered code text — it only prevents the
+    cell-shattering. Backtick runs of any length are matched to their closing
+    run of equal length, mirroring CommonMark code-span rules."""
+    out = []
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if ch == "\\" and i + 1 < n:  # keep existing backslash escapes intact
+            out.append(line[i : i + 2])
+            i += 2
+            continue
+        if ch == "`":
+            j = i
+            while j < n and line[j] == "`":
+                j += 1
+            run = j - i  # opening backtick-run length
+            k = j
+            while k < n:
+                if line[k] == "`":
+                    m = k
+                    while m < n and line[m] == "`":
+                        m += 1
+                    if m - k == run:  # matching closing run -> span is line[j:k]
+                        content = _UNESCAPED_PIPE_RE.sub(r"\\|", line[j:k])
+                        out.append(line[i:j] + content + line[k:m])
+                        i = m
+                        break
+                    k = m
+                else:
+                    k += 1
+            else:  # no closing run: not a code span, emit the rest verbatim
+                out.append(line[i:])
+                i = n
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _protect_table_code_span_pipes(text):
+    """Pre-escape bare ``|`` inside inline code spans, but only on lines that
+    belong to a GFM table. GFM technically requires ``\\|`` there, yet Claude
+    transcripts routinely contain bare pipes (shell commands in comparison
+    tables); the strict parser would shatter those cells. Scoped to table rows
+    so prose code spans like ``ps aux | grep`` are never touched."""
+    if "|" not in text or "`" not in text:
+        return text
+    lines = text.split("\n")
+    in_table = [False] * len(lines)
+    for idx, ln in enumerate(lines):
+        if "|" in ln and _TABLE_DELIMITER_RE.match(ln):
+            if idx > 0 and "|" in lines[idx - 1]:
+                in_table[idx - 1] = True  # header row
+            in_table[idx] = True  # delimiter row (no code spans; harmless)
+            j = idx + 1
+            while j < len(lines) and lines[j].strip() and "|" in lines[j]:
+                in_table[j] = True  # body rows until blank/non-row line
+                j += 1
+    if not any(in_table):
+        return text
+    return "\n".join(
+        _escape_pipes_in_code_spans(ln) if in_table[idx] and "`" in ln else ln
+        for idx, ln in enumerate(lines)
+    )
+
+
 def render_markdown_text(text):
     if not text:
         return ""
-    return markdown.markdown(text, extensions=["fenced_code", "tables"])
+    # markdown-it appends a trailing newline after block elements; strip it so
+    # output stays byte-for-byte identical to the legacy renderer everywhere
+    # except the previously-broken nested-list case.
+    return _md.render(_protect_table_code_span_pipes(text)).rstrip("\n")
 
 
 def is_json_like(text):
