@@ -176,23 +176,36 @@ class SessionMetadata:
     command: originating slash command (e.g. "/plan"), or None for prose sessions.
     from_control_fallback: True when `summary` is only a skipped control command
         (e.g. a /clear-only session) — lets callers avoid double-printing it.
+    ai_title: Claude Code's evolving auto-generated session name (the LAST
+        ``type=="ai-title"`` line), or None. This is the name `claude --resume`
+        shows; independent of `summary` so picker rows keep the prompt text.
     """
 
     summary: str
     branch: str | None
     command: str | None
     from_control_fallback: bool
+    ai_title: str | None = None
+
+    @property
+    def title(self):
+        """Best display name: the AI title when present, else the summary."""
+        return self.ai_title or self.summary
 
 
 def scan_session_metadata(filepath, max_length=200):
     """Extract a session's title, git branch, and originating slash command.
 
-    Single pass over the JSONL. Title precedence:
-      1. an explicit ``type=="summary"`` line (Claude Code's own title)
+    Single pass over the JSONL. Summary precedence:
+      1. an explicit ``type=="summary"`` line (legacy Claude Code title format)
       2. the first non-meta user message that carries intent — skipping
          control/UI slash commands (``_CONTROL_COMMANDS``) so the real task
          command wins over a leading ``/effort``/``/clear`` toggle
       3. a skipped control command, if it was the only content (fallback)
+
+    Independently, the LAST ``type=="ai-title"`` line (Claude Code's evolving
+    auto-generated session name) is captured as ``ai_title``; the ``title``
+    property prefers it over the summary heuristic.
 
     The summary holds the command *args body* (the real prose); the command name
     is returned separately so callers can surface it in its own column.
@@ -203,6 +216,7 @@ def scan_session_metadata(filepath, max_length=200):
     chosen_command = None
     control_fallback = None  # (name, body) of the first skipped control command
     branch = None
+    ai_title = None
 
     try:
         with open(filepath, "r", encoding="utf-8") as f:
@@ -217,6 +231,12 @@ def scan_session_metadata(filepath, max_length=200):
 
                 if branch is None and obj.get("gitBranch"):
                     branch = obj["gitBranch"]
+
+                # Last one wins: Claude Code rewrites the auto-title as the
+                # session evolves, so keep overwriting until EOF.
+                if obj.get("type") == "ai-title" and obj.get("aiTitle"):
+                    ai_title = obj["aiTitle"]
+                    continue
 
                 if (
                     explicit_summary is None
@@ -270,6 +290,7 @@ def scan_session_metadata(filepath, max_length=200):
         branch=branch,
         command=chosen_command,
         from_control_fallback=from_control_fallback,
+        ai_title=_truncate(ai_title, max_length) if ai_title else None,
     )
 
 
