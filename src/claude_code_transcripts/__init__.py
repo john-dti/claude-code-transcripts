@@ -1945,6 +1945,9 @@ def new_live_stats():
         "commits": 0,
         "context_tokens": None,
         "output_tokens": 0,
+        "model": None,
+        "last_usage": None,
+        "usage_totals": {"input": 0, "cache_read": 0, "cache_creation": 0, "output": 0},
     }
 
 
@@ -1971,16 +1974,28 @@ def accumulate_live_stats(state, entry):
     if is_prompt:
         state["prompts"] += 1
     if entry.get("type") == "assistant":
-        usage = entry.get("message", {}).get("usage")
+        message = entry.get("message", {})
+        if message.get("model"):
+            state["model"] = message["model"]
+        usage = message.get("usage")
         if isinstance(usage, dict):
-            # Same semantics as compute_usage_totals: latest context, summed
-            # output.
+            # Same semantics as compute_usage_totals/compute_usage_detail:
+            # latest context + breakdown, summed totals.
             state["output_tokens"] += usage.get("output_tokens", 0) or 0
             state["context_tokens"] = (
                 (usage.get("input_tokens", 0) or 0)
                 + (usage.get("cache_creation_input_tokens", 0) or 0)
                 + (usage.get("cache_read_input_tokens", 0) or 0)
             )
+            fields = {
+                "input": usage.get("input_tokens", 0) or 0,
+                "cache_read": usage.get("cache_read_input_tokens", 0) or 0,
+                "cache_creation": usage.get("cache_creation_input_tokens", 0) or 0,
+                "output": usage.get("output_tokens", 0) or 0,
+            }
+            state["last_usage"] = fields
+            for key, value in fields.items():
+                state["usage_totals"][key] += value
     return state
 
 
@@ -1993,6 +2008,9 @@ def live_stats_payload(state):
         "commits": state["commits"],
         "context_tokens": state["context_tokens"],
         "output_tokens": state["output_tokens"],
+        "model": state["model"],
+        "last": state["last_usage"],
+        "totals": state["usage_totals"],
     }
 
 
@@ -2193,6 +2211,8 @@ LIVE_JS = r"""
     if (card) {
       card.setStats(s);
       card.setUsage({ context_tokens: s.context_tokens, output_tokens: s.output_tokens });
+      card.setUsageDetail({ model: s.model, last: s.last, totals: s.totals });
+      card.recordContext(s.prompts, s.context_tokens);
     }
   });
   es.addEventListener('title', function (e) {

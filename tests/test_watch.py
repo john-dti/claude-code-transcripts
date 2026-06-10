@@ -563,6 +563,7 @@ class TestLiveStats:
                 "timestamp": "T2",
                 "message": {
                     "role": "assistant",
+                    "model": "claude-fable-5",
                     "content": [
                         {
                             "type": "tool_use",
@@ -612,6 +613,74 @@ class TestLiveStats:
             "commits": 1,
             "context_tokens": 60,
             "output_tokens": 40,
+            "model": "claude-fable-5",
+            "last": {
+                "input": 10,
+                "cache_read": 30,
+                "cache_creation": 20,
+                "output": 40,
+            },
+            "totals": {
+                "input": 10,
+                "cache_read": 30,
+                "cache_creation": 20,
+                "output": 40,
+            },
+        }
+
+    def test_model_and_last_replace_while_totals_sum(self):
+        def assistant(model, usage, ts):
+            return {
+                "type": "assistant",
+                "timestamp": ts,
+                "message": {
+                    "role": "assistant",
+                    "model": model,
+                    "content": [{"type": "text", "text": "reply"}],
+                    "usage": usage,
+                },
+            }
+
+        state = new_live_stats()
+        accumulate_live_stats(
+            state,
+            assistant(
+                "claude-old-1",
+                {
+                    "input_tokens": 1,
+                    "cache_creation_input_tokens": 2,
+                    "cache_read_input_tokens": 3,
+                    "output_tokens": 10,
+                },
+                "T1",
+            ),
+        )
+        accumulate_live_stats(
+            state,
+            assistant(
+                "claude-fable-5",
+                {
+                    "input_tokens": 100,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 200,
+                    "output_tokens": 5,
+                },
+                "T2",
+            ),
+        )
+        payload = live_stats_payload(state)
+        assert payload["model"] == "claude-fable-5"  # latest wins
+        assert payload["last"] == {
+            "input": 100,
+            "cache_read": 200,
+            "cache_creation": 0,
+            "output": 5,
+        }
+        assert payload["totals"] == {
+            "input": 101,
+            "cache_read": 203,
+            "cache_creation": 2,
+            "output": 15,
         }
 
     def test_token_fields_track_latest_context_and_sum_output(self):
@@ -1067,6 +1136,9 @@ class TestLiveServer:
             # first title), and a truncation reset re-arms the counter.
             assert "addChapter" in body
             assert "titleCount" in body
+            # Usage detail + context bars update live from stats events.
+            assert "setUsageDetail" in body
+            assert "recordContext" in body
         finally:
             server.shutdown()
             server.server_close()
@@ -1176,6 +1248,15 @@ class TestLiveServer:
                 payload = _data_for(more, "stats")[-1]
                 assert payload["context_tokens"] == 101  # latest, not summed
                 assert payload["output_tokens"] == 10  # summed
+                # /usage-style detail rides the same event.
+                assert payload["last"] == {
+                    "input": 1,
+                    "cache_read": 100,
+                    "cache_creation": 0,
+                    "output": 3,
+                }
+                assert payload["totals"]["output"] == 10
+                assert payload["totals"]["cache_creation"] == 5
         finally:
             server.shutdown()
             server.server_close()
