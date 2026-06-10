@@ -63,6 +63,19 @@ The generated output includes:
 
 Pages are titled with the session's name — Claude Code's auto-generated title when available (the same name `claude --resume` shows), otherwise the first real prompt — so browser tabs stay identifiable with several transcripts open.
 
+### Session info card
+
+Every generated page (and the live `watch` view) carries a floating session info card, collapsed to a small pill in the bottom-right corner showing prompt count and current context size. Click it to expand the full card:
+
+- session name (Claude Code's auto-title)
+- counts: prompts, messages, tool calls, commits
+- usage: current context size and cumulative output tokens, read from the session's recorded `usage` data (hidden when the source has none, e.g. web JSON exports)
+- recap: Claude Code's latest "※ recap" away-summary, falling back to the last assistant reply
+- prompt navigation: every prompt links straight to its message, across pages
+- jump to top / jump to the latest message
+
+The expanded/collapsed choice persists per browser (localStorage).
+
 ### Local sessions
 
 Local Claude Code sessions are stored as JSONL files in `~/.claude/projects`. Run with no arguments to select from recent sessions:
