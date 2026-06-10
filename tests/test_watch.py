@@ -850,6 +850,31 @@ class TestCardDataHelpers:
     def test_prompt_preview_short_text_unchanged(self):
         assert prompt_preview("fix the bug") == "fix the bug"
 
+    def test_prompt_preview_command_wrapper_prettified(self):
+        """Slash-command prompts read as '/name args', not raw XML-ish text."""
+        text = (
+            "<command-message>plan</command-message>\n"
+            "<command-name>/plan</command-name>\n"
+            "<command-args>build the widget</command-args>"
+        )
+        assert prompt_preview(text) == "/plan build the widget"
+
+    def test_prompt_preview_bare_command_wrapper(self):
+        text = (
+            "<command-message>compact</command-message>\n"
+            "<command-name>/compact</command-name>"
+        )
+        assert prompt_preview(text) == "/compact"
+
+    def test_prompt_preview_strips_residual_tags(self):
+        """Non-command wrappers (<task-notification> etc.) lose their tags so
+        the preview shows the human-readable remainder."""
+        text = (
+            "<task-notification><task-id>bap3ou</task-id> "
+            "finished build</task-notification>"
+        )
+        assert prompt_preview(text) == "bap3ou finished build"
+
     def test_usage_detail_model_latest_wins_and_breakdown(self):
         loglines = [
             self._user(),
