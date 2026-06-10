@@ -111,6 +111,8 @@ Options:
 
 Press `Ctrl-C` to stop the server. The page reconnects automatically and re-syncs if the session file is rewritten (for example when Claude compacts it).
 
+The tab title follows the session's auto-generated name (the same name `claude --resume` shows) and renames itself live as the session evolves, so multiple watch tabs stay identifiable.
+
 ### Web sessions
 
 Import sessions directly from the Claude API:

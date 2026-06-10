@@ -853,14 +853,24 @@ def parse_session_file(filepath):
             return json.load(f)
 
 
-def _normalize_jsonl_obj(obj):
+def _normalize_jsonl_obj(obj, include_meta=False):
     """Normalize one parsed JSONL object to a standard logline entry.
 
     Returns the entry dict for user/assistant messages, or None for any other
     entry type (summary, file-history-snapshot, etc.). Shared by the batch
     parser (_parse_jsonl_file) and the live tail reader (read_new_loglines).
+
+    With ``include_meta=True`` (the tail path only), additionally returns
+    typed meta entries the live view reacts to but the static parser must
+    never see: ``{"type": "ai-title", "title": ...}`` for session-name
+    changes. The default keeps the static contract byte-identical.
     """
     entry_type = obj.get("type")
+
+    if include_meta and entry_type == "ai-title":
+        if obj.get("aiTitle"):
+            return {"type": "ai-title", "title": obj["aiTitle"]}
+        return None
 
     # Skip non-message entries
     if entry_type not in ("user", "assistant"):
@@ -933,7 +943,8 @@ def read_new_loglines(path, offset):
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        entry = _normalize_jsonl_obj(obj)
+        # Tail-only: surface meta entries (title changes) alongside messages.
+        entry = _normalize_jsonl_obj(obj, include_meta=True)
         if entry is not None:
             loglines.append(entry)
 
@@ -1762,6 +1773,13 @@ LIVE_JS = r"""
     setCount('stat-tools', s.tool_calls);
     setCount('stat-commits', s.commits);
   });
+  es.addEventListener('title', function (e) {
+    var t = JSON.parse(e.data).title;
+    if (!t) return;
+    document.title = t + ' (live)';
+    var h = document.getElementById('session-title');
+    if (h) h.textContent = t; // textContent: never parsed as HTML
+  });
 })();
 """
 
@@ -1803,9 +1821,15 @@ class _LiveHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def _serve_shell(self):
+        try:
+            # Pre-title the shell so the tab is identifiable before the SSE
+            # replay arrives (and for sessions that never rename).
+            session_title = get_session_title(self.server.session_file)
+        except Exception:
+            session_title = None  # file may not exist yet — title arrives live
         body = (
             get_template("live.html")
-            .render(css=CSS + LIVE_CSS, js=LIVE_JS)
+            .render(css=CSS + LIVE_CSS, js=LIVE_JS, session_title=session_title)
             .encode("utf-8")
         )
         self.send_response(200)
@@ -1839,6 +1863,7 @@ class _LiveHandler(BaseHTTPRequestHandler):
             self._sse_write(format_sse_event("reset", {}))
             offset = 0
             state = new_live_stats()
+            last_title = None
             while not stop_event.is_set():
                 if not path.exists():
                     if stop_event.wait(poll):
@@ -1849,9 +1874,18 @@ class _LiveHandler(BaseHTTPRequestHandler):
                     self._sse_write(format_sse_event("reset", {}))
                     offset = 0
                     state = new_live_stats()
+                    last_title = None
                 loglines, offset = read_new_loglines(path, offset)
                 changed = False
                 for entry in loglines:
+                    if entry.get("type") == "ai-title":
+                        # Deduped: Claude Code re-writes the same title often.
+                        if entry["title"] != last_title:
+                            last_title = entry["title"]
+                            self._sse_write(
+                                format_sse_event("title", {"title": last_title})
+                            )
+                        continue
                     fragment = render_logline(entry)
                     if not fragment:
                         continue
