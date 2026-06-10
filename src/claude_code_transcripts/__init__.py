@@ -191,6 +191,11 @@ class SessionMetadata:
         shows; independent of `summary` so picker rows keep the prompt text.
     recap: the latest away-summary recap (Claude Code's "※ recap:" text), or
         None. Untruncated — it feeds the session info card, not picker rows.
+    title_changes: ((anchor_ts, title), ...) — one entry per DISTINCT ai-title
+        change after the first title. ai-title lines carry no timestamp, so
+        each change is anchored to the latest user-line timestamp seen when it
+        was read; a chapter divider belongs before the first prompt after that
+        anchor.
     """
 
     summary: str
@@ -199,6 +204,7 @@ class SessionMetadata:
     from_control_fallback: bool
     ai_title: str | None = None
     recap: str | None = None
+    title_changes: tuple = ()
 
     @property
     def title(self):
@@ -231,6 +237,8 @@ def scan_session_metadata(filepath, max_length=200):
     branch = None
     ai_title = None
     recap = None
+    last_user_ts = ""  # anchor for title changes (ai-title lines lack one)
+    title_changes = []
 
     try:
         with open(filepath, "r", encoding="utf-8") as f:
@@ -246,10 +254,19 @@ def scan_session_metadata(filepath, max_length=200):
                 if branch is None and obj.get("gitBranch"):
                     branch = obj["gitBranch"]
 
+                if obj.get("type") == "user" and obj.get("timestamp"):
+                    last_user_ts = obj["timestamp"]
+
                 # Last one wins: Claude Code rewrites the auto-title as the
-                # session evolves, so keep overwriting until EOF.
+                # session evolves, so keep overwriting until EOF. A DIFFERENT
+                # title after the first is a chapter-worthy change.
                 if obj.get("type") == "ai-title" and obj.get("aiTitle"):
-                    ai_title = obj["aiTitle"]
+                    new_title = obj["aiTitle"]
+                    if ai_title is not None and new_title != ai_title:
+                        title_changes.append(
+                            (last_user_ts, _truncate(new_title, max_length))
+                        )
+                    ai_title = new_title
                     continue
 
                 # Latest away_summary = the session's current recap.
@@ -315,6 +332,7 @@ def scan_session_metadata(filepath, max_length=200):
         from_control_fallback=from_control_fallback,
         ai_title=_truncate(ai_title, max_length) if ai_title else None,
         recap=recap or None,
+        title_changes=tuple(title_changes),
     )
 
 
