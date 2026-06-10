@@ -586,6 +586,7 @@ def find_all_sessions(folder, include_agents=False):
                 "summary": meta.summary,
                 "title": meta.title,
                 "recap": meta.recap,
+                "title_changes": meta.title_changes,
                 "branch": meta.branch,
                 "command": meta.command,
                 "mtime": stat.st_mtime,
@@ -759,13 +760,14 @@ def generate_batch_html(
 
             # Generate transcript HTML with error handling
             try:
-                # Title/recap from the scan find_all_sessions already did —
-                # avoids a second metadata pass per archived session.
+                # Title/recap/chapters from the scan find_all_sessions already
+                # did — avoids a second metadata pass per archived session.
                 generate_html(
                     session["path"],
                     session_dir,
                     title=session.get("title"),
                     recap=session.get("recap"),
+                    title_changes=session.get("title_changes"),
                 )
                 successful_sessions += 1
                 # Record the mtime we actually rendered against, not a re-stat
@@ -2074,6 +2076,10 @@ LIVE_JS = r"""
   // SSE handlers below feed it.
   var card = window.sessionCard || null;
   if (card) card.init(null);
+  // Title changes after the first become chapter dividers in the prompt
+  // list; reset (truncation replay) re-arms the counter so the replayed
+  // first title doesn't spawn a spurious divider.
+  var titleCount = 0;
 
   function nearBottom() {
     return (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 120);
@@ -2093,6 +2099,7 @@ LIVE_JS = r"""
     if (messages) messages.innerHTML = '';
     if (tocList) tocList.innerHTML = '';
     setCount('stat-prompts', 0); setCount('stat-messages', 0); setCount('stat-tools', 0); setCount('stat-commits', 0);
+    titleCount = 0;
     if (card) card.reset();
   });
   es.addEventListener('append', function (e) {
@@ -2143,7 +2150,11 @@ LIVE_JS = r"""
     document.title = t + ' (live)';
     var h = document.getElementById('session-title');
     if (h) h.textContent = t; // textContent: never parsed as HTML
-    if (card) card.setTitle(t);
+    if (card) {
+      card.setTitle(t);
+      titleCount += 1;
+      if (titleCount > 1) card.addChapter(t); // server already dedupes
+    }
   });
   es.addEventListener('recap', function (e) {
     var r = JSON.parse(e.data);
@@ -2444,6 +2455,7 @@ details.continuation[open] summary { border-radius: 12px 12px 0 0; margin-bottom
 .index-commit-header { display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem; margin-bottom: 4px; }
 .index-commit-hash { font-family: monospace; color: #e65100; font-weight: 600; }
 .index-commit-msg { color: #5d4037; }
+.index-chapter { text-align: center; color: var(--text-muted); font-weight: 600; font-size: 0.85rem; margin: 20px 0 12px; }
 .index-item-long-text { margin-top: 8px; padding: 12px; background: var(--card-bg); border-radius: 8px; border-left: 3px solid var(--assistant-border); }
 .index-item-long-text .truncatable.truncated::after { background: linear-gradient(to bottom, transparent, var(--card-bg)); }
 .index-item-long-text-content { color: var(--text-color); }
@@ -2584,6 +2596,7 @@ CARD_CSS = """
 #session-card .card-section-label { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin: 8px 0 4px; }
 #session-card .card-recap-text { background: var(--thinking-bg); border-left: 3px solid var(--thinking-border); border-radius: 6px; padding: 8px 10px; }
 #session-card .card-prompt-list { margin: 0; padding-left: 22px; max-height: 32vh; overflow-y: auto; }
+#session-card .card-chapter { list-style: none; margin: 6px 0 2px -22px; text-align: center; color: var(--text-muted); font-weight: 600; font-size: 0.75rem; }
 #session-card .card-prompt-list li { margin: 2px 0; }
 #session-card .card-prompt-list a { color: inherit; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; max-width: 100%; }
 #session-card .card-prompt-list a:hover { text-decoration: underline; }
@@ -2737,10 +2750,17 @@ CARD_JS = r"""
     li.appendChild(a);
     refs.promptList.appendChild(li);
   }
+  function addChapter(title) {
+    if (!refs.promptList || !title) return;
+    refs.promptList.appendChild(el('li', 'card-chapter', '── ' + title + ' ──'));
+  }
   function setPrompts(list) {
     if (!refs.promptList) return;
     refs.promptList.innerHTML = '';
-    (list || []).forEach(addPrompt);
+    (list || []).forEach(function (item) {
+      if (item && item.kind === 'chapter') addChapter(item.title);
+      else addPrompt(item);
+    });
   }
   function setLatestLink(href) {
     if (!refs.latestBtn || !href) return;
@@ -2772,7 +2792,7 @@ CARD_JS = r"""
   window.sessionCard = {
     init: init, reset: reset, setTitle: setTitle, setStats: setStats,
     setUsage: setUsage, setRecap: setRecap, addPrompt: addPrompt,
-    setPrompts: setPrompts, setLatestLink: setLatestLink
+    addChapter: addChapter, setPrompts: setPrompts, setLatestLink: setLatestLink
   };
 
   // Static pages: auto-init from the embedded JSON payload.
@@ -2978,11 +2998,15 @@ def _build_conversations(loglines):
     return conversations
 
 
-def _render_session_pages(loglines, output_dir, title, recap, echo=print):
+def _render_session_pages(
+    loglines, output_dir, title, recap, title_changes=None, echo=print
+):
     """Shared session-page core: stats, timeline, card payload, pages + index.
 
-    Callers resolve title/recap and set the _github_repo global first; `echo`
-    is print (file path) or click.echo (web path) for progress lines.
+    Callers resolve title/recap/title_changes and set the _github_repo global
+    first; `echo` is print (file path) or click.echo (web path) for progress
+    lines. title_changes ((anchor_ts, title), ...) become chapter dividers
+    before the first prompt whose timestamp exceeds each anchor.
     """
     conversations = _build_conversations(loglines)
 
@@ -3008,6 +3032,7 @@ def _render_session_pages(loglines, output_dir, title, recap, echo=print):
     # Build timeline items: prompts and commits merged by timestamp
     timeline_items = []
     card_prompts = []
+    pending_chapters = list(title_changes or ())
 
     # Add prompts
     prompt_num = 0
@@ -3021,6 +3046,16 @@ def _render_session_pages(loglines, output_dir, title, recap, echo=print):
         msg_id = make_msg_id(conv["timestamp"])
         link = f"page-{page_num:03d}.html#{msg_id}"
         rendered_content = render_markdown_text(conv["user_text"])
+        # Chapter dividers: a title change anchored before this prompt slots
+        # in just above it. The timeline item shares this prompt's timestamp
+        # and is appended first, so the stable sort keeps it directly above.
+        # Changes with no later prompt are dropped (nothing to head).
+        while pending_chapters and conv["timestamp"] > pending_chapters[0][0]:
+            _, chapter_title = pending_chapters.pop(0)
+            card_prompts.append({"kind": "chapter", "title": chapter_title})
+            timeline_items.append(
+                (conv["timestamp"], "chapter", _macros.index_chapter(chapter_title))
+            )
         card_prompts.append(
             {
                 "num": prompt_num,
@@ -3143,13 +3178,16 @@ def _render_session_pages(loglines, output_dir, title, recap, echo=print):
     )
 
 
-def generate_html(json_path, output_dir, github_repo=None, title=None, recap=None):
+def generate_html(
+    json_path, output_dir, github_repo=None, title=None, recap=None, title_changes=None
+):
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
 
     if title is None:
-        # CLI path: one scan yields both the name and the recap. Batch callers
-        # (generate_batch_html) pass both in from the scan they already did.
+        # CLI path: one scan yields the name, recap, and title changes. Batch
+        # callers (generate_batch_html) pass all three from the scan they
+        # already did.
         json_path_p = Path(json_path)
         if json_path_p.suffix == ".jsonl":
             meta = scan_session_metadata(json_path_p, max_length=80)
@@ -3157,6 +3195,8 @@ def generate_html(json_path, output_dir, github_repo=None, title=None, recap=Non
                 title = meta.title
             if recap is None:
                 recap = meta.recap
+            if title_changes is None:
+                title_changes = meta.title_changes
         else:
             title = get_session_title(json_path)
 
@@ -3179,7 +3219,7 @@ def generate_html(json_path, output_dir, github_repo=None, title=None, recap=Non
     global _github_repo
     _github_repo = github_repo
 
-    _render_session_pages(loglines, output_dir, title, recap, echo=print)
+    _render_session_pages(loglines, output_dir, title, recap, title_changes, echo=print)
 
 
 @click.group(cls=DefaultGroup, default="local", default_if_no_args=True)
@@ -3586,7 +3626,8 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
     global _github_repo
     _github_repo = github_repo
 
-    _render_session_pages(loglines, output_dir, title, recap, echo=click.echo)
+    # Web exports carry no ai-title lines, so there are no chapter dividers.
+    _render_session_pages(loglines, output_dir, title, recap, None, echo=click.echo)
 
 
 @cli.command("web")

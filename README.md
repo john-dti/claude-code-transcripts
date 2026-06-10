@@ -72,6 +72,7 @@ Every generated page (and the live `watch` view) carries a floating session info
 - usage: current context size and cumulative output tokens, read from the session's recorded `usage` data (hidden when the source has none, e.g. web JSON exports)
 - recap: Claude Code's latest "※ recap" away-summary, falling back to the last assistant reply
 - prompt navigation: every prompt links straight to its message, across pages
+- chapter dividers: when Claude Code's auto-title changes mid-session, a `── new title ──` divider marks the spot in the prompt list (and the index timeline); sessions with one stable title look unchanged
 - jump to top / jump to the latest message
 
 The expanded/collapsed choice persists per browser (localStorage).

@@ -1845,6 +1845,134 @@ class TestSessionCard:
         assert "sessionCard" in page  # CARD_JS shipped
 
 
+class TestTitleChapters:
+    """ai-title changes appear as chapter dividers in the card prompt list
+    and the index timeline, before the first prompt after the change."""
+
+    def _session_with_change(self, tmp_path):
+        """4 prompts; the title changes during turn 2 -> divider before #3."""
+        lines = [{"type": "ai-title", "aiTitle": "Phase one", "sessionId": "x"}]
+        for i in range(4):
+            lines.append(
+                {
+                    "type": "user",
+                    "timestamp": f"2025-01-01T10:0{i}:00.000Z",
+                    "message": {"role": "user", "content": f"prompt number {i}"},
+                }
+            )
+            lines.append(
+                {
+                    "type": "assistant",
+                    "timestamp": f"2025-01-01T10:0{i}:30.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": f"reply {i}"}],
+                    },
+                }
+            )
+            if i == 1:
+                lines.append(
+                    {"type": "ai-title", "aiTitle": "Phase two", "sessionId": "x"}
+                )
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        return f
+
+    def _card_data(self, html_text):
+        blob = html_text.split('id="session-card-data"')[1]
+        blob = blob.split(">", 1)[1].split("</script>")[0]
+        return json.loads(blob)
+
+    def test_card_payload_interleaves_chapter_before_next_prompt(self, tmp_path):
+        f = self._session_with_change(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        prompts = self._card_data((out / "index.html").read_text(encoding="utf-8"))[
+            "prompts"
+        ]
+        kinds = [p.get("kind", "prompt") for p in prompts]
+        assert kinds == ["prompt", "prompt", "chapter", "prompt", "prompt"]
+        assert prompts[2]["title"] == "Phase two"
+        assert prompts[3]["num"] == 3  # divider precedes prompt #3
+
+    def test_index_timeline_has_chapter_heading_between_items(self, tmp_path):
+        f = self._session_with_change(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        index = (out / "index.html").read_text(encoding="utf-8")
+        chapter_pos = index.find('class="index-chapter"')
+        assert chapter_pos != -1
+        assert "Phase two" in index[chapter_pos : chapter_pos + 200]
+        p2_pos = index.find('class="index-item-number">#2')
+        p3_pos = index.find('class="index-item-number">#3')
+        assert p2_pos < chapter_pos < p3_pos
+
+    def test_stable_title_session_has_no_chapters(self, tmp_path):
+        lines = [
+            {"type": "ai-title", "aiTitle": "Only name", "sessionId": "x"},
+            {
+                "type": "user",
+                "timestamp": "2025-01-01T10:00:00.000Z",
+                "message": {"role": "user", "content": "hello"},
+            },
+            {"type": "ai-title", "aiTitle": "Only name", "sessionId": "x"},
+        ]
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        out = tmp_path / "out"
+        generate_html(f, out)
+        index = (out / "index.html").read_text(encoding="utf-8")
+        assert 'class="index-chapter"' not in index
+        prompts = self._card_data(index)["prompts"]
+        assert all("kind" not in p for p in prompts)
+
+    def test_change_after_last_prompt_dropped(self, tmp_path):
+        lines = [
+            {"type": "ai-title", "aiTitle": "First", "sessionId": "x"},
+            {
+                "type": "user",
+                "timestamp": "2025-01-01T10:00:00.000Z",
+                "message": {"role": "user", "content": "only prompt"},
+            },
+            {"type": "ai-title", "aiTitle": "Renamed at the end", "sessionId": "x"},
+        ]
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        out = tmp_path / "out"
+        generate_html(f, out)
+        index = (out / "index.html").read_text(encoding="utf-8")
+        assert 'class="index-chapter"' not in index
+
+    def test_explicit_title_changes_param_wins(self, tmp_path):
+        f = self._session_with_change(tmp_path)
+        out = tmp_path / "out"
+        generate_html(
+            f, out, title="Override", title_changes=(("", "Injected chapter"),)
+        )
+        prompts = self._card_data((out / "index.html").read_text(encoding="utf-8"))[
+            "prompts"
+        ]
+        assert prompts[0] == {"kind": "chapter", "title": "Injected chapter"}
+        assert "Phase two" not in json.dumps(prompts)
+
+    def test_batch_threads_title_changes(self, tmp_path):
+        from claude_code_transcripts import generate_batch_html
+
+        projects = tmp_path / "projects" / "D--projects-devjig"
+        projects.mkdir(parents=True)
+        self._session_with_change(projects)
+        out = tmp_path / "archive"
+        generate_batch_html(tmp_path / "projects", out)
+        content = (out / "devjig" / "s" / "index.html").read_text(encoding="utf-8")
+        assert 'class="index-chapter"' in content
+
+
 class TestLocalSessionCLI:
     """Tests for CLI behavior with local sessions."""
 

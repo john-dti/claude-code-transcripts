@@ -985,6 +985,10 @@ class TestLiveServer:
             assert 'id="session-card"' in body
             assert "sessionCard" in body  # CARD_JS wired in
             assert 'id="toc-list"' in body  # existing TOC untouched
+            # Chapter dividers: client inserts one per title CHANGE (not the
+            # first title), and a truncation reset re-arms the counter.
+            assert "addChapter" in body
+            assert "titleCount" in body
         finally:
             server.shutdown()
             server.server_close()
