@@ -61,6 +61,8 @@ The generated output includes:
 - `index.html` - an index page with a timeline of prompts and commits
 - `page-001.html`, `page-002.html`, etc. - paginated transcript pages
 
+Pages are titled with the session's name — Claude Code's auto-generated title when available (the same name `claude --resume` shows), otherwise the first real prompt — so browser tabs stay identifiable with several transcripts open.
+
 ### Local sessions
 
 Local Claude Code sessions are stored as JSONL files in `~/.claude/projects`. Run with no arguments to select from recent sessions:
@@ -99,7 +101,8 @@ claude-code-transcripts watch --session ~/.claude/projects/my-project/abc123.jso
 Options:
 
 - `--session PATH` - tail a specific session file instead of the newest
-- `--pick` - choose the session from a list instead of auto-selecting the newest
+- `--pick` - choose the session from a list instead of auto-selecting the newest. The picker shows the same columns as `local` (date, size, git branch, project, slash command, summary).
+- `--limit N` - maximum sessions to show with `--pick` (default: 10)
 - `-s, --source DIRECTORY` - projects folder to search (default: `~/.claude/projects`)
 - `--port N` - port to serve on (default: an OS-assigned free port)
 - `--repo OWNER/NAME` - GitHub repo for commit links (auto-detected if not specified)
@@ -107,6 +110,8 @@ Options:
 - `--poll-interval SECONDS` - how often to check the file for new lines (default: 0.3)
 
 Press `Ctrl-C` to stop the server. The page reconnects automatically and re-syncs if the session file is rewritten (for example when Claude compacts it).
+
+The tab title follows the session's auto-generated name (the same name `claude --resume` shows) and renames itself live as the session evolves, so multiple watch tabs stay identifiable.
 
 ### Web sessions
 

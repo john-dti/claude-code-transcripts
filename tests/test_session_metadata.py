@@ -13,11 +13,13 @@ session picker and the HTML archive listing. The behaviors under test:
 """
 
 import json
+from pathlib import Path
 
 from claude_code_transcripts import (
     scan_session_metadata,
     SessionMetadata,
     format_session_choice,
+    build_session_choices,
 )
 
 
@@ -155,6 +157,66 @@ class TestScanSessionMetadata:
         assert meta.branch is None
         assert meta.command is None
 
+    def test_ai_title_last_wins(self, tmp_path):
+        """Claude Code appends ai-title lines as the auto-title evolves; the
+        LAST one is the session's current name (what `claude --resume` shows).
+
+        Shape verified against real ~/.claude/projects files (Claude Code
+        v2.1.x, 2026-06-10):
+        {"type":"ai-title","aiTitle":"...","sessionId":"..."}
+        """
+        f = tmp_path / "s.jsonl"
+        _write_jsonl(
+            f,
+            [
+                _user("plain prose prompt"),
+                {"type": "ai-title", "aiTitle": "Early title", "sessionId": "abc"},
+                {
+                    "type": "ai-title",
+                    "aiTitle": "Fix database refresh script column errors",
+                    "sessionId": "abc",
+                },
+            ],
+        )
+        meta = scan_session_metadata(f)
+        assert meta.ai_title == "Fix database refresh script column errors"
+
+    def test_ai_title_absent_is_none(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        _write_jsonl(f, [_user("plain prose prompt")])
+        assert scan_session_metadata(f).ai_title is None
+
+    def test_title_prefers_ai_title_over_summary(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        _write_jsonl(
+            f,
+            [
+                _user("plain prose prompt"),
+                {"type": "ai-title", "aiTitle": "The real name", "sessionId": "abc"},
+            ],
+        )
+        assert scan_session_metadata(f).title == "The real name"
+
+    def test_title_falls_back_to_summary(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        _write_jsonl(f, [_user("plain prose prompt")])
+        assert scan_session_metadata(f).title == "plain prose prompt"
+
+    def test_ai_title_does_not_displace_summary(self, tmp_path):
+        """ai_title and summary are independent: the picker keeps showing the
+        prompt-derived summary while title consumers get the AI name."""
+        f = tmp_path / "s.jsonl"
+        _write_jsonl(
+            f,
+            [
+                {"type": "ai-title", "aiTitle": "Name", "sessionId": "abc"},
+                _user("plain prose prompt"),
+            ],
+        )
+        meta = scan_session_metadata(f)
+        assert meta.summary == "plain prose prompt"
+        assert meta.ai_title == "Name"
+
 
 # A fixed epoch so the rendered date is stable across machines/timezones; the
 # assertions below only check the variable columns, not the date itself.
@@ -226,3 +288,64 @@ class TestFormatSessionChoice:
         row = format_session_choice(meta, _MTIME, 1024, "proj", summary_width=44)
         assert "..." in row
         assert "x" * 200 not in row
+
+
+def _make_session(projects_dir, project_folder, name, entries):
+    """Write one session JSONL under a Claude-style encoded project folder."""
+    proj = projects_dir / project_folder
+    proj.mkdir(parents=True, exist_ok=True)
+    f = proj / name
+    _write_jsonl(f, entries)
+    return f
+
+
+class TestBuildSessionChoices:
+    """Tests for build_session_choices — the shared local/watch picker rows.
+
+    Both the `local` and `watch --pick` pickers must render identical rows
+    (date · size · [branch] · project · command · summary), built from ONE
+    metadata scan per file.
+    """
+
+    def test_choice_rows_use_shared_format(self, tmp_path):
+        f = _make_session(
+            tmp_path,
+            "D--projects-devjig",
+            "abc.jsonl",
+            [_user(_command("/plan", "build the widget"), branch="dti/x")],
+        )
+        choices = build_session_choices(tmp_path)
+        assert len(choices) == 1
+        assert choices[0].value == f
+        row = choices[0].title
+        assert "[dti/x]" in row
+        assert "devjig" in row  # decoded project display name
+        assert "/plan" in row
+        assert "build the widget" in row
+
+    def test_scans_each_file_once(self, tmp_path, monkeypatch):
+        """The old local picker scanned every file twice (find + per-row)."""
+        import claude_code_transcripts as cct
+
+        for i in range(2):
+            _make_session(tmp_path, "proj", f"s{i}.jsonl", [_user(f"prompt {i}")])
+
+        calls = []
+        real = cct.scan_session_metadata
+
+        def counting(path, *args, **kwargs):
+            calls.append(Path(path))
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(cct, "scan_session_metadata", counting)
+        cct.build_session_choices(tmp_path)
+        assert len(calls) == 2
+
+    def test_respects_limit(self, tmp_path):
+        for i in range(5):
+            _make_session(tmp_path, "proj", f"s{i}.jsonl", [_user(f"prompt {i}")])
+        assert len(build_session_choices(tmp_path, limit=3)) == 3
+
+    def test_empty_folder_returns_empty_list(self, tmp_path):
+        assert build_session_choices(tmp_path) == []
+        assert build_session_choices(tmp_path / "missing") == []

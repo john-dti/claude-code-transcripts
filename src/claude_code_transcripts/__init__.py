@@ -176,23 +176,36 @@ class SessionMetadata:
     command: originating slash command (e.g. "/plan"), or None for prose sessions.
     from_control_fallback: True when `summary` is only a skipped control command
         (e.g. a /clear-only session) — lets callers avoid double-printing it.
+    ai_title: Claude Code's evolving auto-generated session name (the LAST
+        ``type=="ai-title"`` line), or None. This is the name `claude --resume`
+        shows; independent of `summary` so picker rows keep the prompt text.
     """
 
     summary: str
     branch: str | None
     command: str | None
     from_control_fallback: bool
+    ai_title: str | None = None
+
+    @property
+    def title(self):
+        """Best display name: the AI title when present, else the summary."""
+        return self.ai_title or self.summary
 
 
 def scan_session_metadata(filepath, max_length=200):
     """Extract a session's title, git branch, and originating slash command.
 
-    Single pass over the JSONL. Title precedence:
-      1. an explicit ``type=="summary"`` line (Claude Code's own title)
+    Single pass over the JSONL. Summary precedence:
+      1. an explicit ``type=="summary"`` line (legacy Claude Code title format)
       2. the first non-meta user message that carries intent — skipping
          control/UI slash commands (``_CONTROL_COMMANDS``) so the real task
          command wins over a leading ``/effort``/``/clear`` toggle
       3. a skipped control command, if it was the only content (fallback)
+
+    Independently, the LAST ``type=="ai-title"`` line (Claude Code's evolving
+    auto-generated session name) is captured as ``ai_title``; the ``title``
+    property prefers it over the summary heuristic.
 
     The summary holds the command *args body* (the real prose); the command name
     is returned separately so callers can surface it in its own column.
@@ -203,6 +216,7 @@ def scan_session_metadata(filepath, max_length=200):
     chosen_command = None
     control_fallback = None  # (name, body) of the first skipped control command
     branch = None
+    ai_title = None
 
     try:
         with open(filepath, "r", encoding="utf-8") as f:
@@ -217,6 +231,12 @@ def scan_session_metadata(filepath, max_length=200):
 
                 if branch is None and obj.get("gitBranch"):
                     branch = obj["gitBranch"]
+
+                # Last one wins: Claude Code rewrites the auto-title as the
+                # session evolves, so keep overwriting until EOF.
+                if obj.get("type") == "ai-title" and obj.get("aiTitle"):
+                    ai_title = obj["aiTitle"]
+                    continue
 
                 if (
                     explicit_summary is None
@@ -270,6 +290,7 @@ def scan_session_metadata(filepath, max_length=200):
         branch=branch,
         command=chosen_command,
         from_control_fallback=from_control_fallback,
+        ai_title=_truncate(ai_title, max_length) if ai_title else None,
     )
 
 
@@ -292,6 +313,23 @@ def format_session_choice(meta, mtime, size_bytes, project, summary_width=44):
         summary = _truncate(meta.summary, summary_width)
     proj = _truncate(project or "", 28)
     return f"{date_str}  {size_kb:5.0f} KB  {branch:<20} {proj:<28} {cmd:<16} {summary}".rstrip()
+
+
+def build_session_choices(folder, limit=10):
+    """Scan recent sessions once and build aligned questionary Choices.
+
+    Shared by the `local` and `watch --pick` pickers so both render identical
+    rows (see format_session_choice). find_local_sessions already extracted
+    everything a row needs — one metadata scan per file. Each Choice.value is
+    the session Path.
+    """
+    choices = []
+    for filepath, meta in find_local_sessions(folder, limit=limit):
+        stat = filepath.stat()
+        project = get_project_display_name(filepath.parent.name)
+        display = format_session_choice(meta, stat.st_mtime, stat.st_size, project)
+        choices.append(questionary.Choice(title=display, value=filepath))
+    return choices
 
 
 # Module-level variable for GitHub repo (set by generate_html)
@@ -328,11 +366,31 @@ def get_session_summary(filepath, max_length=200):
         return "(no summary)"
 
 
+def get_session_title(filepath, max_length=80):
+    """Best display name for a session file, or None when nothing usable.
+
+    JSONL: the last aiTitle, else the summary heuristic. JSON: the first user
+    message. "(no summary)" maps to None so callers fall back to the generic
+    page title. Shorter default truncation than the picker — this feeds
+    browser-tab titles.
+    """
+    filepath = Path(filepath)
+    if filepath.suffix == ".jsonl":
+        title = scan_session_metadata(filepath, max_length=max_length).title
+    else:
+        title = get_session_summary(filepath, max_length=max_length)
+    if not title or title == "(no summary)":
+        return None
+    return title
+
+
 def find_local_sessions(folder, limit=10):
     """Find recent JSONL session files in the given folder.
 
-    Returns a list of (Path, summary) tuples sorted by modification time.
-    Excludes agent files and warmup/empty sessions.
+    Returns a list of (Path, SessionMetadata) tuples sorted by modification
+    time. Excludes agent files and warmup/empty sessions. Carrying the full
+    metadata (not just the summary string) lets pickers render branch/project/
+    command columns without re-scanning every file.
     """
     folder = Path(folder)
     if not folder.exists():
@@ -342,11 +400,11 @@ def find_local_sessions(folder, limit=10):
     for f in folder.glob("**/*.jsonl"):
         if f.name.startswith("agent-"):
             continue
-        summary = get_session_summary(f)
+        meta = scan_session_metadata(f)
         # Skip boring/empty sessions
-        if summary.lower() == "warmup" or summary == "(no summary)":
+        if meta.summary.lower() == "warmup" or meta.summary == "(no summary)":
             continue
-        results.append((f, summary))
+        results.append((f, meta))
 
     # Sort by modification time, most recent first
     results.sort(key=lambda x: x[0].stat().st_mtime, reverse=True)
@@ -484,6 +542,7 @@ def find_all_sessions(folder, include_agents=False):
             {
                 "path": session_file,
                 "summary": meta.summary,
+                "title": meta.title,
                 "branch": meta.branch,
                 "command": meta.command,
                 "mtime": stat.st_mtime,
@@ -657,7 +716,9 @@ def generate_batch_html(
 
             # Generate transcript HTML with error handling
             try:
-                generate_html(session["path"], session_dir)
+                # Title from the scan find_all_sessions already did — avoids a
+                # second metadata pass per archived session.
+                generate_html(session["path"], session_dir, title=session.get("title"))
                 successful_sessions += 1
                 # Record the mtime we actually rendered against, not a re-stat
                 # — if the source kept growing during conversion, the next run
@@ -792,14 +853,24 @@ def parse_session_file(filepath):
             return json.load(f)
 
 
-def _normalize_jsonl_obj(obj):
+def _normalize_jsonl_obj(obj, include_meta=False):
     """Normalize one parsed JSONL object to a standard logline entry.
 
     Returns the entry dict for user/assistant messages, or None for any other
     entry type (summary, file-history-snapshot, etc.). Shared by the batch
     parser (_parse_jsonl_file) and the live tail reader (read_new_loglines).
+
+    With ``include_meta=True`` (the tail path only), additionally returns
+    typed meta entries the live view reacts to but the static parser must
+    never see: ``{"type": "ai-title", "title": ...}`` for session-name
+    changes. The default keeps the static contract byte-identical.
     """
     entry_type = obj.get("type")
+
+    if include_meta and entry_type == "ai-title":
+        if obj.get("aiTitle"):
+            return {"type": "ai-title", "title": obj["aiTitle"]}
+        return None
 
     # Skip non-message entries
     if entry_type not in ("user", "assistant"):
@@ -872,7 +943,8 @@ def read_new_loglines(path, offset):
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        entry = _normalize_jsonl_obj(obj)
+        # Tail-only: surface meta entries (title changes) alongside messages.
+        entry = _normalize_jsonl_obj(obj, include_meta=True)
         if entry is not None:
             loglines.append(entry)
 
@@ -1701,6 +1773,13 @@ LIVE_JS = r"""
     setCount('stat-tools', s.tool_calls);
     setCount('stat-commits', s.commits);
   });
+  es.addEventListener('title', function (e) {
+    var t = JSON.parse(e.data).title;
+    if (!t) return;
+    document.title = t + ' (live)';
+    var h = document.getElementById('session-title');
+    if (h) h.textContent = t; // textContent: never parsed as HTML
+  });
 })();
 """
 
@@ -1742,9 +1821,15 @@ class _LiveHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def _serve_shell(self):
+        try:
+            # Pre-title the shell so the tab is identifiable before the SSE
+            # replay arrives (and for sessions that never rename).
+            session_title = get_session_title(self.server.session_file)
+        except Exception:
+            session_title = None  # file may not exist yet — title arrives live
         body = (
             get_template("live.html")
-            .render(css=CSS + LIVE_CSS, js=LIVE_JS)
+            .render(css=CSS + LIVE_CSS, js=LIVE_JS, session_title=session_title)
             .encode("utf-8")
         )
         self.send_response(200)
@@ -1778,6 +1863,7 @@ class _LiveHandler(BaseHTTPRequestHandler):
             self._sse_write(format_sse_event("reset", {}))
             offset = 0
             state = new_live_stats()
+            last_title = None
             while not stop_event.is_set():
                 if not path.exists():
                     if stop_event.wait(poll):
@@ -1788,9 +1874,18 @@ class _LiveHandler(BaseHTTPRequestHandler):
                     self._sse_write(format_sse_event("reset", {}))
                     offset = 0
                     state = new_live_stats()
+                    last_title = None
                 loglines, offset = read_new_loglines(path, offset)
                 changed = False
                 for entry in loglines:
+                    if entry.get("type") == "ai-title":
+                        # Deduped: Claude Code re-writes the same title often.
+                        if entry["title"] != last_title:
+                            last_title = entry["title"]
+                            self._sse_write(
+                                format_sse_event("title", {"title": last_title})
+                            )
+                        continue
                     fragment = render_logline(entry)
                     if not fragment:
                         continue
@@ -2239,9 +2334,12 @@ def generate_index_pagination_html(total_pages):
     return _macros.index_pagination(total_pages)
 
 
-def generate_html(json_path, output_dir, github_repo=None):
+def generate_html(json_path, output_dir, github_repo=None, title=None):
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
+
+    if title is None:
+        title = get_session_title(json_path)
 
     # Load session file (supports both JSON and JSONL)
     data = parse_session_file(json_path)
@@ -2318,6 +2416,7 @@ def generate_html(json_path, output_dir, github_repo=None):
         page_content = page_template.render(
             css=CSS,
             js=JS,
+            session_title=title,
             page_num=page_num,
             total_pages=total_pages,
             pagination_html=pagination_html,
@@ -2399,6 +2498,7 @@ def generate_html(json_path, output_dir, github_repo=None):
     index_content = index_template.render(
         css=CSS,
         js=JS,
+        session_title=title,
         pagination_html=index_pagination,
         prompt_num=prompt_num,
         total_messages=total_messages,
@@ -2470,20 +2570,11 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
         return
 
     click.echo("Loading local sessions...")
-    results = find_local_sessions(projects_folder, limit=limit)
+    choices = build_session_choices(projects_folder, limit=limit)
 
-    if not results:
+    if not choices:
         click.echo("No local sessions found.")
         return
-
-    # Build choices for questionary
-    choices = []
-    for filepath, summary in results:
-        stat = filepath.stat()
-        meta = scan_session_metadata(filepath)
-        project = get_project_display_name(filepath.parent.name)
-        display = format_session_choice(meta, stat.st_mtime, stat.st_size, project)
-        choices.append(questionary.Choice(title=display, value=filepath))
 
     selected = questionary.select(
         "Select a session to convert:",
@@ -2546,6 +2637,11 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
     help="Choose the session from a list instead of auto-selecting the newest.",
 )
 @click.option(
+    "--limit",
+    default=10,
+    help="Maximum sessions to show with --pick (default: 10).",
+)
+@click.option(
     "-s",
     "--source",
     type=click.Path(),
@@ -2571,7 +2667,7 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
     default=0.3,
     help="Seconds between file polls (default: 0.3).",
 )
-def watch_cmd(session, pick, source, port, repo, open_browser, poll_interval):
+def watch_cmd(session, pick, limit, source, port, repo, open_browser, poll_interval):
     """Tail an active Claude Code session live in your browser.
 
     Starts a local server and streams the session to the browser as Claude
@@ -2580,20 +2676,11 @@ def watch_cmd(session, pick, source, port, repo, open_browser, poll_interval):
     projects_folder = Path(source) if source else (Path.home() / ".claude" / "projects")
 
     if pick and not session:
-        results = find_local_sessions(projects_folder)
-        if not results:
+        # Same rows as the `local` picker (branch/project/command columns).
+        choices = build_session_choices(projects_folder, limit=limit)
+        if not choices:
             click.echo("No local sessions found.")
             return
-        choices = []
-        for filepath, summary in results:
-            stat = filepath.stat()
-            mod_time = datetime.fromtimestamp(stat.st_mtime)
-            size_kb = stat.st_size / 1024
-            date_str = mod_time.strftime("%Y-%m-%d %H:%M")
-            if len(summary) > 50:
-                summary = summary[:47] + "..."
-            display = f"{date_str}  {size_kb:5.0f} KB  {summary}"
-            choices.append(questionary.Choice(title=display, value=filepath))
         session_file = questionary.select(
             "Select a session to watch:", choices=choices
         ).ask()
@@ -2814,6 +2901,9 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
 
+    # Web sessions carry their own display title.
+    title = session_data.get("title")
+
     loglines = session_data.get("loglines", [])
 
     # Auto-detect GitHub repo if not provided
@@ -2882,6 +2972,7 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
         page_content = page_template.render(
             css=CSS,
             js=JS,
+            session_title=title,
             page_num=page_num,
             total_pages=total_pages,
             pagination_html=pagination_html,
@@ -2963,6 +3054,7 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
     index_content = index_template.render(
         css=CSS,
         js=JS,
+        session_title=title,
         pagination_html=index_pagination,
         prompt_num=prompt_num,
         total_messages=total_messages,

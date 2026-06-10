@@ -35,6 +35,16 @@ def _user_line(text, ts="T"):
     return (json.dumps(obj) + "\n").encode("utf-8")
 
 
+def _ai_title_line(title):
+    """One JSONL ai-title line — Claude Code's evolving session name.
+
+    Shape verified against real ~/.claude/projects files (Claude Code v2.1.x,
+    2026-06-10): {"type":"ai-title","aiTitle":"...","sessionId":"..."}
+    """
+    obj = {"type": "ai-title", "aiTitle": title, "sessionId": "s"}
+    return (json.dumps(obj) + "\n").encode("utf-8")
+
+
 def _write_session(path, data, mtime):
     """Write a session file under `path` and stamp its mtime."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -135,6 +145,28 @@ class TestNormalizeJsonlObj:
 
     def test_other_type_skipped(self):
         assert _normalize_jsonl_obj({"type": "file-history-snapshot", "foo": 1}) is None
+
+    def test_ai_title_dropped_by_default(self):
+        """The static parse path never sees meta entries — contract unchanged."""
+        obj = {"type": "ai-title", "aiTitle": "Name", "sessionId": "x"}
+        assert _normalize_jsonl_obj(obj) is None
+
+    def test_ai_title_with_include_meta(self):
+        obj = {"type": "ai-title", "aiTitle": "Name", "sessionId": "x"}
+        assert _normalize_jsonl_obj(obj, include_meta=True) == {
+            "type": "ai-title",
+            "title": "Name",
+        }
+
+    def test_empty_ai_title_dropped_with_include_meta(self):
+        assert (
+            _normalize_jsonl_obj({"type": "ai-title", "aiTitle": ""}, include_meta=True)
+            is None
+        )
+
+    def test_system_dropped_even_with_include_meta(self):
+        obj = {"type": "system", "subtype": "turn_duration", "timestamp": "T"}
+        assert _normalize_jsonl_obj(obj, include_meta=True) is None
 
 
 class TestParseJsonlFileCharacterization:
@@ -276,6 +308,18 @@ class TestReadNewLoglines:
 
         assert [e["message"]["content"] for e in loglines] == ["one"]
         assert offset == len(line)
+
+
+class TestReadNewLoglinesMeta:
+    """The tail reader surfaces meta entries (titles) the static parser drops."""
+
+    def test_ai_title_line_yields_meta_entry(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        data = _ai_title_line("Live name")
+        p.write_bytes(data)
+        loglines, offset = read_new_loglines(p, 0)
+        assert loglines == [{"type": "ai-title", "title": "Live name"}]
+        assert offset == len(data)
 
 
 class TestFormatSseEvent:
@@ -624,6 +668,60 @@ class TestLiveServer:
             server.server_close()
             t.join(timeout=5)
 
+    def test_title_event_streams_and_dedupes(self, tmp_path):
+        """Tab titles follow the session's ai-title: pre-titled shell, a title
+        event on connect-replay and on change, no event for duplicates."""
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(
+            _user_line("first prompt", "2025-01-01T10:00:00.000Z")
+            + _ai_title_line("First name")
+        )
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            body = httpx.get(f"http://127.0.0.1:{port}/", timeout=5).text
+            assert "First name" in body  # shell pre-titled server-side
+            assert 'id="session-title"' in body
+
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                initial = _collect_sse(
+                    lines, lambda evs: any(ev == "title" for ev, _ in evs)
+                )
+                assert _data_for(initial, "title") == [{"title": "First name"}]
+
+                with open(p, "ab") as f:
+                    f.write(_ai_title_line("Renamed"))
+                    f.flush()
+                    os.fsync(f.fileno())
+                more = _collect_sse(
+                    lines, lambda evs: any(ev == "title" for ev, _ in evs)
+                )
+                assert _data_for(more, "title") == [{"title": "Renamed"}]
+
+                # A duplicate title must NOT re-emit; the trailing user line
+                # provides a stats fence proving the tail consumed both lines.
+                with open(p, "ab") as f:
+                    f.write(_ai_title_line("Renamed"))
+                    f.write(_user_line("second prompt", "2025-01-01T10:05:00.000Z"))
+                    f.flush()
+                    os.fsync(f.fileno())
+                fenced = _collect_sse(
+                    lines,
+                    lambda evs: any(
+                        ev == "stats" and json.loads(d)["prompts"] == 2 for ev, d in evs
+                    ),
+                )
+                assert _data_for(fenced, "title") == []
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
     def test_disconnect_then_shutdown_is_clean(self, tmp_path):
         p = tmp_path / "s.jsonl"
         p.write_bytes(_user_line("hi", "2025-01-01T10:00:00.000Z"))
@@ -711,3 +809,89 @@ class TestWatchCommand:
 
         assert result.exit_code == 0, result.output
         assert "chosen.jsonl" in result.output  # picked, not the newer one
+
+    def test_help_lists_limit(self):
+        result = CliRunner().invoke(cli, ["watch", "--help"])
+        assert result.exit_code == 0
+        assert "--limit" in result.output
+
+    def test_pick_rows_match_local_format(
+        self, tmp_path, monkeypatch, mock_webbrowser_open
+    ):
+        """--pick rows carry the same branch/project/command columns as `local`.
+
+        The old watch picker printed only date · size · summary, which made
+        eight identical "/plan ..." sessions indistinguishable.
+        """
+        line = {
+            "type": "user",
+            "timestamp": "T",
+            "gitBranch": "dti/x",
+            "message": {
+                "role": "user",
+                "content": (
+                    "<command-message>plan</command-message>\n"
+                    "<command-name>/plan</command-name>\n"
+                    "<command-args>build the widget</command-args>"
+                ),
+            },
+        }
+        _write_session(
+            tmp_path / "D--projects-devjig" / "s.jsonl",
+            (json.dumps(line) + "\n").encode("utf-8"),
+            2000,
+        )
+
+        captured = {}
+
+        def fake_select(message, choices=None, **kwargs):
+            captured["choices"] = choices
+
+            class _P:
+                def ask(self):
+                    return choices[0].value
+
+            return _P()
+
+        monkeypatch.setattr("claude_code_transcripts.questionary.select", fake_select)
+        monkeypatch.setattr(
+            "claude_code_transcripts._LiveServer.serve_forever", lambda self: None
+        )
+
+        result = CliRunner().invoke(cli, ["watch", "--pick", "--source", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        row = captured["choices"][0].title
+        assert "[dti/x]" in row
+        assert "devjig" in row  # decoded project display name
+        assert "/plan" in row
+        assert "build the widget" in row
+
+    def test_pick_respects_limit(self, tmp_path, monkeypatch, mock_webbrowser_open):
+        for i in range(3):
+            _write_session(
+                tmp_path / "p" / f"s{i}.jsonl", _user_line(f"prompt {i}"), 2000 + i
+            )
+
+        captured = {}
+
+        def fake_select(message, choices=None, **kwargs):
+            captured["choices"] = choices
+
+            class _P:
+                def ask(self):
+                    return choices[0].value
+
+            return _P()
+
+        monkeypatch.setattr("claude_code_transcripts.questionary.select", fake_select)
+        monkeypatch.setattr(
+            "claude_code_transcripts._LiveServer.serve_forever", lambda self: None
+        )
+
+        result = CliRunner().invoke(
+            cli, ["watch", "--pick", "--limit", "2", "--source", str(tmp_path)]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert len(captured["choices"]) == 2
