@@ -1486,6 +1486,64 @@ class TestFindLocalSessions:
         assert len(results) == 3
 
 
+class TestBlockAnchors:
+    """Assistant content blocks carry stable msg-<ts>-bN ids so artifacts
+    (insights, thinking, plans) can be deep-linked."""
+
+    MSG_ID = "msg-2025-01-01T10-00-00-000Z"
+
+    def _assistant_json(self):
+        return json.dumps(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "pondering deeply"},
+                    {"type": "text", "text": "the reply"},
+                    {
+                        "type": "tool_use",
+                        "name": "ExitPlanMode",
+                        "input": {"allowedPrompts": []},
+                        "id": "t1",
+                    },
+                ],
+            }
+        )
+
+    def test_assistant_blocks_get_indexed_ids(self):
+        html_out = render_message(
+            "assistant", self._assistant_json(), "2025-01-01T10:00:00.000Z"
+        )
+        assert f'id="{self.MSG_ID}-b0"' in html_out  # thinking
+        assert f'id="{self.MSG_ID}-b1"' in html_out  # text
+        assert f'id="{self.MSG_ID}-b2"' in html_out  # generic tool_use
+
+    def test_enumeration_counts_all_blocks(self):
+        """Index = content-array position, not a per-type counter."""
+        msg = json.dumps(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "tool_use", "name": "Grep", "input": {}, "id": "t1"},
+                    {"type": "text", "text": "third"},
+                ],
+            }
+        )
+        html_out = render_message("assistant", msg, "2025-01-01T10:00:00.000Z")
+        assert f'id="{self.MSG_ID}-b0"' in html_out
+        assert f'id="{self.MSG_ID}-b2"' in html_out
+
+    def test_render_content_block_without_id_has_no_id_attr(self):
+        """Back-compat: block fragments without an anchor stay id-free."""
+        out = render_content_block({"type": "text", "text": "hi"})
+        assert "id=" not in out
+
+    def test_user_messages_carry_no_block_ids(self):
+        msg = json.dumps({"role": "user", "content": "hello"})
+        html_out = render_message("user", msg, "2025-01-01T10:00:00.000Z")
+        assert "-b0" not in html_out
+
+
 class TestSessionTitles:
     """Static pages are titled with the session's name (Claude Code's
     auto-title when present, else the summary heuristic) so browser tabs stay

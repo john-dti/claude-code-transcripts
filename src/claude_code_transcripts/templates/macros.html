@@ -101,9 +101,10 @@
 </div>
 {%- endmacro %}
 
-{# Generic tool use - input_json is pre-formatted so needs |safe #}
-{% macro tool_use(tool_name, description, input_json, tool_id) %}
-<div class="tool-use" data-tool-id="{{ tool_id }}"><div class="tool-header"><span class="tool-icon">⚙</span> {{ tool_name }}</div>
+{# Generic tool use - input_json is pre-formatted so needs |safe.
+   block_id (optional) is the stable msg-<ts>-bN deep-link anchor. #}
+{% macro tool_use(tool_name, description, input_json, tool_id, block_id='') %}
+<div class="tool-use" data-tool-id="{{ tool_id }}"{% if block_id %} id="{{ block_id }}"{% endif %}><div class="tool-header"><span class="tool-icon">⚙</span> {{ tool_name }}</div>
 {%- if description -%}
 <div class="tool-description">{{ description }}</div>
 {%- endif -%}
@@ -124,14 +125,14 @@
 {# Thinking block - content_html is pre-rendered markdown so needs |safe.
    markdown_source carries the pre-render text so the per-message "copy
    markdown" button can reassemble the original markdown from the DOM. #}
-{% macro thinking(content_html, markdown_source='') %}
-<div class="thinking" data-markdown="{{ markdown_source }}"><div class="thinking-label">Thinking</div>{{ content_html|safe }}</div>
+{% macro thinking(content_html, markdown_source='', block_id='') %}
+<div class="thinking" data-markdown="{{ markdown_source }}"{% if block_id %} id="{{ block_id }}"{% endif %}><div class="thinking-label">Thinking</div>{{ content_html|safe }}</div>
 {%- endmacro %}
 
 {# Assistant text - content_html is pre-rendered markdown so needs |safe.
    See thinking() for markdown_source rationale. #}
-{% macro assistant_text(content_html, markdown_source='') %}
-<div class="assistant-text" data-markdown="{{ markdown_source }}">{{ content_html|safe }}</div>
+{% macro assistant_text(content_html, markdown_source='', block_id='') %}
+<div class="assistant-text" data-markdown="{{ markdown_source }}"{% if block_id %} id="{{ block_id }}"{% endif %}>{{ content_html|safe }}</div>
 {%- endmacro %}
 
 {# User content - content_html is pre-rendered so needs |safe.

@@ -403,6 +403,23 @@ class TestFormatSseEvent:
 class TestRenderLogline:
     """Single-entry HTML fragment for the live stream."""
 
+    def test_assistant_blocks_carry_anchor_ids(self):
+        """Live fragments get the same block anchors as static pages."""
+        entry = {
+            "type": "assistant",
+            "timestamp": "2025-01-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "hmm"},
+                    {"type": "text", "text": "reply"},
+                ],
+            },
+        }
+        fragment = render_logline(entry)
+        assert 'id="msg-2025-01-01T10-00-00-000Z-b0"' in fragment
+        assert 'id="msg-2025-01-01T10-00-00-000Z-b1"' in fragment
+
     def test_user_entry(self):
         entry = {
             "type": "user",

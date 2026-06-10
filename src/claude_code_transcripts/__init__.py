@@ -1332,7 +1332,7 @@ def render_bash_tool(tool_input, tool_id):
     return _macros.bash_tool(command, description, tool_id)
 
 
-def render_content_block(block):
+def render_content_block(block, block_id=None):
     if not isinstance(block, dict):
         return f"<p>{html.escape(str(block))}</p>"
     block_type = block.get("type", "")
@@ -1344,11 +1344,11 @@ def render_content_block(block):
     elif block_type == "thinking":
         thinking_text = block.get("thinking", "")
         content_html = render_markdown_text(thinking_text)
-        return _macros.thinking(content_html, thinking_text)
+        return _macros.thinking(content_html, thinking_text, block_id or "")
     elif block_type == "text":
         text = block.get("text", "")
         content_html = render_markdown_text(text)
-        return _macros.assistant_text(content_html, text)
+        return _macros.assistant_text(content_html, text, block_id or "")
     elif block_type == "tool_use":
         tool_name = block.get("name", "Unknown tool")
         tool_input = block.get("input", {})
@@ -1364,7 +1364,9 @@ def render_content_block(block):
         description = tool_input.get("description", "")
         display_input = {k: v for k, v in tool_input.items() if k != "description"}
         input_json = json.dumps(display_input, indent=2, ensure_ascii=False)
-        return _macros.tool_use(tool_name, description, input_json, tool_id)
+        return _macros.tool_use(
+            tool_name, description, input_json, tool_id, block_id or ""
+        )
     elif block_type == "tool_result":
         content = block.get("content", "")
         is_error = block.get("is_error", False)
@@ -1442,15 +1444,40 @@ def render_user_message_content(message_data):
     return f"<p>{html.escape(str(content))}</p>"
 
 
-def render_assistant_message(message_data):
+def render_assistant_message(message_data, msg_id=None):
     content = message_data.get("content", [])
     if not isinstance(content, list):
         return f"<p>{html.escape(str(content))}</p>"
-    return "".join(render_content_block(block) for block in content)
+    if msg_id is None:
+        return "".join(render_content_block(block) for block in content)
+    return "".join(
+        render_content_block(block, block_id=bid)
+        for bid, block in iter_assistant_blocks(message_data, msg_id)
+    )
 
 
 def make_msg_id(timestamp):
     return f"msg-{timestamp.replace(':', '-').replace('.', '-')}"
+
+
+def block_anchor(msg_id, index):
+    """Stable element id for content block `index` of message `msg_id`."""
+    return f"{msg_id}-b{index}"
+
+
+def iter_assistant_blocks(message_data, msg_id):
+    """Yield (block_id, block) for every content block of an assistant message.
+
+    The single enumeration shared by rendering and artifact extraction, so
+    deep-link anchors can never drift from the rendered ids. The index is the
+    content-array position — every block counts, whether or not its renderer
+    emits an id.
+    """
+    content = message_data.get("content", [])
+    if not isinstance(content, list):
+        return
+    for i, block in enumerate(content):
+        yield block_anchor(msg_id, i), block
 
 
 def analyze_conversation(messages):
@@ -1544,6 +1571,7 @@ def render_message(log_type, message_json, timestamp):
         message_data = json.loads(message_json)
     except json.JSONDecodeError:
         return ""
+    msg_id = make_msg_id(timestamp)
     if log_type == "user":
         content_html = render_user_message_content(message_data)
         # Check if this is a tool result message
@@ -1552,13 +1580,12 @@ def render_message(log_type, message_json, timestamp):
         else:
             role_class, role_label = "user", "User"
     elif log_type == "assistant":
-        content_html = render_assistant_message(message_data)
+        content_html = render_assistant_message(message_data, msg_id)
         role_class, role_label = "assistant", "Assistant"
     else:
         return ""
     if not content_html.strip():
         return ""
-    msg_id = make_msg_id(timestamp)
     return _macros.message(role_class, role_label, msg_id, timestamp, content_html)
 
 
