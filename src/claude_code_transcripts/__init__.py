@@ -2456,6 +2456,10 @@ details.continuation[open] summary { border-radius: 12px 12px 0 0; margin-bottom
 .index-commit-hash { font-family: monospace; color: #e65100; font-weight: 600; }
 .index-commit-msg { color: #5d4037; }
 .index-chapter { text-align: center; color: var(--text-muted); font-weight: 600; font-size: 0.85rem; margin: 20px 0 12px; }
+.index-artifacts { display: flex; flex-direction: column; gap: 2px; padding: 6px 16px 10px 32px; border-top: 1px solid rgba(0,0,0,0.06); font-size: 0.85rem; }
+.index-artifact { color: var(--text-muted); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.index-artifact:hover { color: var(--text-color); text-decoration: underline; }
+.index-artifact-icon { display: inline-block; width: 1.4em; }
 .index-item-long-text { margin-top: 8px; padding: 12px; background: var(--card-bg); border-radius: 8px; border-left: 3px solid var(--assistant-border); }
 .index-item-long-text .truncatable.truncated::after { background: linear-gradient(to bottom, transparent, var(--card-bg)); }
 .index-item-long-text-content { color: var(--text-color); }
@@ -2597,6 +2601,13 @@ CARD_CSS = """
 #session-card .card-recap-text { background: var(--thinking-bg); border-left: 3px solid var(--thinking-border); border-radius: 6px; padding: 8px 10px; }
 #session-card .card-prompt-list { margin: 0; padding-left: 22px; max-height: 32vh; overflow-y: auto; }
 #session-card .card-chapter { list-style: none; margin: 6px 0 2px -22px; text-align: center; color: var(--text-muted); font-weight: 600; font-size: 0.75rem; }
+#session-card .card-prompt-toggle { background: transparent; border: none; cursor: pointer; color: var(--text-muted); font-size: 0.75rem; padding: 0 4px 0 0; margin-left: -14px; }
+#session-card .card-prompt-toggle:hover { color: var(--text-color); }
+#session-card .card-artifacts { list-style: none; margin: 2px 0 4px; padding-left: 14px; }
+#session-card .card-artifact { margin: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#session-card .card-artifact a { color: var(--text-muted); text-decoration: none; }
+#session-card .card-artifact a:hover { color: var(--text-color); text-decoration: underline; }
+#session-card .card-artifact-icon { display: inline-block; width: 1.3em; }
 #session-card .card-prompt-list li { margin: 2px 0; }
 #session-card .card-prompt-list a { color: inherit; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; max-width: 100%; }
 #session-card .card-prompt-list a:hover { text-decoration: underline; }
@@ -2609,11 +2620,15 @@ CARD_CSS = """
 CARD_JS = r"""
 (function () {
   var STORAGE_KEY = 'cct-card-expanded';
+  var ICONS = { insight: '★', thinking: '💭', plan: '📋', completion: '✓' };
   var root = null;
   var refs = {};
   var statsState = { prompts: 0, messages: 0, tool_calls: 0, commits: 0 };
   var lastCtx = null;
   var recapPinned = false; // a real recap beats assistant-text fallbacks
+  var promptItems = {}; // num -> {li, toggle, sublist}
+  var promptHrefs = {}; // num -> href (context bars + artifact fallbacks)
+  var artifactByAnchor = {}; // anchor id -> {li, icon} for retype-in-place
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -2745,10 +2760,52 @@ CARD_JS = r"""
   function addPrompt(p) {
     if (!refs.promptList || !p) return;
     var li = el('li');
+    var toggle = el('button', 'card-prompt-toggle', '▸');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-label', 'Show artifacts');
+    toggle.hidden = true; // revealed when the first artifact arrives
     var a = el('a', null, '#' + p.num + '  ' + p.preview);
     a.href = p.link || ('#' + p.id);
+    li.appendChild(toggle);
     li.appendChild(a);
     refs.promptList.appendChild(li);
+    promptHrefs[p.num] = a.href;
+    var item = { li: li, toggle: toggle, sublist: null };
+    promptItems[p.num] = item;
+    toggle.addEventListener('click', function () {
+      if (!item.sublist) return;
+      var open = item.sublist.hidden;
+      item.sublist.hidden = !open;
+      toggle.textContent = open ? '▾' : '▸';
+    });
+    (p.artifacts || []).forEach(function (art) { addArtifact(p.num, art); });
+  }
+  function addArtifact(num, a) {
+    if (!a || !a.id) return;
+    var existing = artifactByAnchor[a.id];
+    if (existing) {
+      // Retype in place: a completion that re-targets an insight block swaps
+      // type/icon but keeps the richer insight label.
+      existing.li.className = 'card-artifact card-artifact-' + a.type;
+      existing.icon.textContent = ICONS[a.type] || '•';
+      return;
+    }
+    var item = promptItems[num];
+    if (!item) return;
+    if (!item.sublist) {
+      item.sublist = el('ol', 'card-artifacts');
+      item.sublist.hidden = true; // collapsed by default
+      item.li.appendChild(item.sublist);
+      item.toggle.hidden = false;
+    }
+    var li = el('li', 'card-artifact card-artifact-' + a.type);
+    var icon = el('span', 'card-artifact-icon', ICONS[a.type] || '•');
+    var link = el('a', null, a.label || a.type);
+    link.href = a.link || ('#' + a.id);
+    li.appendChild(icon);
+    li.appendChild(link);
+    item.sublist.appendChild(li);
+    artifactByAnchor[a.id] = { li: li, icon: icon };
   }
   function addChapter(title) {
     if (!refs.promptList || !title) return;
@@ -2770,6 +2827,9 @@ CARD_JS = r"""
   function reset() {
     recapPinned = false;
     lastCtx = null;
+    promptItems = {};
+    promptHrefs = {};
+    artifactByAnchor = {};
     setStats({ prompts: 0, messages: 0, tool_calls: 0, commits: 0 });
     if (refs.usage) refs.usage.hidden = true;
     if (refs.recapWrap) refs.recapWrap.hidden = true;
@@ -2792,7 +2852,8 @@ CARD_JS = r"""
   window.sessionCard = {
     init: init, reset: reset, setTitle: setTitle, setStats: setStats,
     setUsage: setUsage, setRecap: setRecap, addPrompt: addPrompt,
-    addChapter: addChapter, setPrompts: setPrompts, setLatestLink: setLatestLink
+    addArtifact: addArtifact, addChapter: addChapter, setPrompts: setPrompts,
+    setLatestLink: setLatestLink
   };
 
   // Static pages: auto-init from the embedded JSON payload.
@@ -3056,6 +3117,29 @@ def _render_session_pages(
             timeline_items.append(
                 (conv["timestamp"], "chapter", _macros.index_chapter(chapter_title))
             )
+        # Collect all messages including from subsequent continuation
+        # conversations (long_texts/artifacts belong to the original prompt).
+        # Each continuation keeps ITS page so artifact links stay correct
+        # when a conversation crosses a page boundary.
+        all_messages = list(conv["messages"])
+        message_groups = [(page_num, conv["messages"])]
+        for j in range(i + 1, len(conversations)):
+            if not conversations[j].get("is_continuation"):
+                break
+            all_messages.extend(conversations[j]["messages"])
+            message_groups.append(
+                ((j // PROMPTS_PER_PAGE) + 1, conversations[j]["messages"])
+            )
+
+        artifacts = [
+            {
+                "type": a["type"],
+                "label": a["label"],
+                "id": a["anchor"],
+                "link": f"page-{a['page']:03d}.html#{a['anchor']}",
+            }
+            for a in extract_conversation_artifacts(message_groups)
+        ]
         card_prompts.append(
             {
                 "num": prompt_num,
@@ -3063,16 +3147,9 @@ def _render_session_pages(
                 "link": link,
                 "preview": prompt_preview(conv["user_text"]),
                 "timestamp": conv["timestamp"],
+                "artifacts": artifacts,
             }
         )
-
-        # Collect all messages including from subsequent continuation conversations
-        # This ensures long_texts from continuations appear with the original prompt
-        all_messages = list(conv["messages"])
-        for j in range(i + 1, len(conversations)):
-            if not conversations[j].get("is_continuation"):
-                break
-            all_messages.extend(conversations[j]["messages"])
 
         # Analyze conversation for stats (excluding commits from inline display now)
         stats = analyze_conversation(all_messages)
@@ -3085,8 +3162,20 @@ def _render_session_pages(
 
         stats_html = _macros.index_stats(tool_stats_str, long_texts_html)
 
+        artifacts_html = (
+            _macros.index_artifacts(
+                [dict(a, icon=ARTIFACT_ICONS.get(a["type"], "•")) for a in artifacts]
+            )
+            if artifacts
+            else ""
+        )
         item_html = _macros.index_item(
-            prompt_num, link, conv["timestamp"], rendered_content, stats_html
+            prompt_num,
+            link,
+            conv["timestamp"],
+            rendered_content,
+            stats_html,
+            artifacts_html,
         )
         timeline_items.append((conv["timestamp"], "prompt", item_html))
 

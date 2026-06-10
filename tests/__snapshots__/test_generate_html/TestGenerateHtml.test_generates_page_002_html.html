@@ -126,6 +126,10 @@ details.continuation[open] summary { border-radius: 12px 12px 0 0; margin-bottom
 .index-commit-hash { font-family: monospace; color: #e65100; font-weight: 600; }
 .index-commit-msg { color: #5d4037; }
 .index-chapter { text-align: center; color: var(--text-muted); font-weight: 600; font-size: 0.85rem; margin: 20px 0 12px; }
+.index-artifacts { display: flex; flex-direction: column; gap: 2px; padding: 6px 16px 10px 32px; border-top: 1px solid rgba(0,0,0,0.06); font-size: 0.85rem; }
+.index-artifact { color: var(--text-muted); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.index-artifact:hover { color: var(--text-color); text-decoration: underline; }
+.index-artifact-icon { display: inline-block; width: 1.4em; }
 .index-item-long-text { margin-top: 8px; padding: 12px; background: var(--card-bg); border-radius: 8px; border-left: 3px solid var(--assistant-border); }
 .index-item-long-text .truncatable.truncated::after { background: linear-gradient(to bottom, transparent, var(--card-bg)); }
 .index-item-long-text-content { color: var(--text-color); }
@@ -165,6 +169,13 @@ details.continuation[open] summary { border-radius: 12px 12px 0 0; margin-bottom
 #session-card .card-recap-text { background: var(--thinking-bg); border-left: 3px solid var(--thinking-border); border-radius: 6px; padding: 8px 10px; }
 #session-card .card-prompt-list { margin: 0; padding-left: 22px; max-height: 32vh; overflow-y: auto; }
 #session-card .card-chapter { list-style: none; margin: 6px 0 2px -22px; text-align: center; color: var(--text-muted); font-weight: 600; font-size: 0.75rem; }
+#session-card .card-prompt-toggle { background: transparent; border: none; cursor: pointer; color: var(--text-muted); font-size: 0.75rem; padding: 0 4px 0 0; margin-left: -14px; }
+#session-card .card-prompt-toggle:hover { color: var(--text-color); }
+#session-card .card-artifacts { list-style: none; margin: 2px 0 4px; padding-left: 14px; }
+#session-card .card-artifact { margin: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#session-card .card-artifact a { color: var(--text-muted); text-decoration: none; }
+#session-card .card-artifact a:hover { color: var(--text-color); text-decoration: underline; }
+#session-card .card-artifact-icon { display: inline-block; width: 1.3em; }
 #session-card .card-prompt-list li { margin: 2px 0; }
 #session-card .card-prompt-list a { color: inherit; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; max-width: 100%; }
 #session-card .card-prompt-list a:hover { text-decoration: underline; }
@@ -219,7 +230,7 @@ def multiply(a: int, b: int) -&gt; int:
 </div>
 
         <div id="session-card" hidden></div>
-<script id="session-card-data" type="application/json">{"title": "Create a simple Python function to add two numbers", "stats": {"prompts": 5, "messages": 33, "tool_calls": 12, "commits": 2}, "usage": {"context_tokens": null, "output_tokens": 0}, "recap": {"text": "Added multiply function!", "source": "assistant"}, "prompts": [{"num": 1, "id": "msg-2025-12-24T10-00-00-000Z", "link": "page-001.html#msg-2025-12-24T10-00-00-000Z", "preview": "Create a simple Python function to add two numbers", "timestamp": "2025-12-24T10:00:00.000Z"}, {"num": 2, "id": "msg-2025-12-24T10-01-00-000Z", "link": "page-001.html#msg-2025-12-24T10-01-00-000Z", "preview": "Now edit the file to add a subtract function", "timestamp": "2025-12-24T10:01:00.000Z"}, {"num": 3, "id": "msg-2025-12-24T10-02-00-000Z", "link": "page-001.html#msg-2025-12-24T10-02-00-000Z", "preview": "Run the tests again", "timestamp": "2025-12-24T10:02:00.000Z"}, {"num": 4, "id": "msg-2025-12-24T10-03-00-000Z", "link": "page-001.html#msg-2025-12-24T10-03-00-000Z", "preview": "Fix the issue and commit", "timestamp": "2025-12-24T10:03:00.000Z"}, {"num": 5, "id": "msg-2025-12-24T10-05-00-000Z", "link": "page-002.html#msg-2025-12-24T10-05-00-000Z", "preview": "Add a multiply function too", "timestamp": "2025-12-24T10:05:00.000Z"}], "latest_link": "page-002.html#msg-2025-12-24T10-05-15-000Z"}</script>
+<script id="session-card-data" type="application/json">{"title": "Create a simple Python function to add two numbers", "stats": {"prompts": 5, "messages": 33, "tool_calls": 12, "commits": 2}, "usage": {"context_tokens": null, "output_tokens": 0}, "recap": {"text": "Added multiply function!", "source": "assistant"}, "prompts": [{"num": 1, "id": "msg-2025-12-24T10-00-00-000Z", "link": "page-001.html#msg-2025-12-24T10-00-00-000Z", "preview": "Create a simple Python function to add two numbers", "timestamp": "2025-12-24T10:00:00.000Z", "artifacts": [{"type": "completion", "label": "Committed! Now pushing to remote.", "id": "msg-2025-12-24T10-00-45-000Z-b0", "link": "page-001.html#msg-2025-12-24T10-00-45-000Z-b0"}]}, {"num": 2, "id": "msg-2025-12-24T10-01-00-000Z", "link": "page-001.html#msg-2025-12-24T10-01-00-000Z", "preview": "Now edit the file to add a subtract function", "timestamp": "2025-12-24T10:01:00.000Z", "artifacts": [{"type": "completion", "label": "Added the subtract function. Let me verify with grep.", "id": "msg-2025-12-24T10-01-25-000Z-b0", "link": "page-001.html#msg-2025-12-24T10-01-25-000Z-b0"}]}, {"num": 3, "id": "msg-2025-12-24T10-02-00-000Z", "link": "page-001.html#msg-2025-12-24T10-02-00-000Z", "preview": "Run the tests again", "timestamp": "2025-12-24T10:02:00.000Z", "artifacts": [{"type": "completion", "label": "There's a test failure. I need to check the test file and...", "id": "msg-2025-12-24T10-02-15-000Z-b0", "link": "page-001.html#msg-2025-12-24T10-02-15-000Z-b0"}]}, {"num": 4, "id": "msg-2025-12-24T10-03-00-000Z", "link": "page-001.html#msg-2025-12-24T10-03-00-000Z", "preview": "Fix the issue and commit", "timestamp": "2025-12-24T10:03:00.000Z", "artifacts": [{"type": "completion", "label": "Done! The subtract function is now working and committed.", "id": "msg-2025-12-24T10-03-25-000Z-b0", "link": "page-001.html#msg-2025-12-24T10-03-25-000Z-b0"}]}, {"num": 5, "id": "msg-2025-12-24T10-05-00-000Z", "link": "page-002.html#msg-2025-12-24T10-05-00-000Z", "preview": "Add a multiply function too", "timestamp": "2025-12-24T10:05:00.000Z", "artifacts": [{"type": "completion", "label": "Added multiply function!", "id": "msg-2025-12-24T10-05-15-000Z-b0", "link": "page-002.html#msg-2025-12-24T10-05-15-000Z-b0"}]}], "latest_link": "page-002.html#msg-2025-12-24T10-05-15-000Z"}</script>
     </div>
     <script>
 document.querySelectorAll('time[data-timestamp]').forEach(function(el) {
@@ -318,11 +329,15 @@ document.querySelectorAll('.message').forEach(function(msg) {
 
 (function () {
   var STORAGE_KEY = 'cct-card-expanded';
+  var ICONS = { insight: '★', thinking: '💭', plan: '📋', completion: '✓' };
   var root = null;
   var refs = {};
   var statsState = { prompts: 0, messages: 0, tool_calls: 0, commits: 0 };
   var lastCtx = null;
   var recapPinned = false; // a real recap beats assistant-text fallbacks
+  var promptItems = {}; // num -> {li, toggle, sublist}
+  var promptHrefs = {}; // num -> href (context bars + artifact fallbacks)
+  var artifactByAnchor = {}; // anchor id -> {li, icon} for retype-in-place
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -454,10 +469,52 @@ document.querySelectorAll('.message').forEach(function(msg) {
   function addPrompt(p) {
     if (!refs.promptList || !p) return;
     var li = el('li');
+    var toggle = el('button', 'card-prompt-toggle', '▸');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-label', 'Show artifacts');
+    toggle.hidden = true; // revealed when the first artifact arrives
     var a = el('a', null, '#' + p.num + '  ' + p.preview);
     a.href = p.link || ('#' + p.id);
+    li.appendChild(toggle);
     li.appendChild(a);
     refs.promptList.appendChild(li);
+    promptHrefs[p.num] = a.href;
+    var item = { li: li, toggle: toggle, sublist: null };
+    promptItems[p.num] = item;
+    toggle.addEventListener('click', function () {
+      if (!item.sublist) return;
+      var open = item.sublist.hidden;
+      item.sublist.hidden = !open;
+      toggle.textContent = open ? '▾' : '▸';
+    });
+    (p.artifacts || []).forEach(function (art) { addArtifact(p.num, art); });
+  }
+  function addArtifact(num, a) {
+    if (!a || !a.id) return;
+    var existing = artifactByAnchor[a.id];
+    if (existing) {
+      // Retype in place: a completion that re-targets an insight block swaps
+      // type/icon but keeps the richer insight label.
+      existing.li.className = 'card-artifact card-artifact-' + a.type;
+      existing.icon.textContent = ICONS[a.type] || '•';
+      return;
+    }
+    var item = promptItems[num];
+    if (!item) return;
+    if (!item.sublist) {
+      item.sublist = el('ol', 'card-artifacts');
+      item.sublist.hidden = true; // collapsed by default
+      item.li.appendChild(item.sublist);
+      item.toggle.hidden = false;
+    }
+    var li = el('li', 'card-artifact card-artifact-' + a.type);
+    var icon = el('span', 'card-artifact-icon', ICONS[a.type] || '•');
+    var link = el('a', null, a.label || a.type);
+    link.href = a.link || ('#' + a.id);
+    li.appendChild(icon);
+    li.appendChild(link);
+    item.sublist.appendChild(li);
+    artifactByAnchor[a.id] = { li: li, icon: icon };
   }
   function addChapter(title) {
     if (!refs.promptList || !title) return;
@@ -479,6 +536,9 @@ document.querySelectorAll('.message').forEach(function(msg) {
   function reset() {
     recapPinned = false;
     lastCtx = null;
+    promptItems = {};
+    promptHrefs = {};
+    artifactByAnchor = {};
     setStats({ prompts: 0, messages: 0, tool_calls: 0, commits: 0 });
     if (refs.usage) refs.usage.hidden = true;
     if (refs.recapWrap) refs.recapWrap.hidden = true;
@@ -501,7 +561,8 @@ document.querySelectorAll('.message').forEach(function(msg) {
   window.sessionCard = {
     init: init, reset: reset, setTitle: setTitle, setStats: setStats,
     setUsage: setUsage, setRecap: setRecap, addPrompt: addPrompt,
-    addChapter: addChapter, setPrompts: setPrompts, setLatestLink: setLatestLink
+    addArtifact: addArtifact, addChapter: addChapter, setPrompts: setPrompts,
+    setLatestLink: setLatestLink
   };
 
   // Static pages: auto-init from the embedded JSON payload.

@@ -1973,6 +1973,216 @@ class TestTitleChapters:
         assert 'class="index-chapter"' in content
 
 
+INSIGHT_BLOCK_TEXT = (
+    "`★ Insight ─────────────────────────────────────`\n"
+    "- Anchors are assigned by content position\n"
+    "`─────────────────────────────────────────────────`"
+)
+
+
+class TestArtifactLinks:
+    """Artifacts (insights, substantial thinking, plans, completions) are
+    deep-linked from the card prompt tree and the index timeline."""
+
+    def _session(self, tmp_path):
+        """5 prompts + a continuation that crosses onto page 2. Prompt #5 is
+        the rich one: long thinking, insight, ExitPlanMode, mid reply — with
+        its final reply arriving in the continuation (page 2)."""
+        lines = [{"type": "ai-title", "aiTitle": "Artifact demo", "sessionId": "x"}]
+        for i in range(4):
+            lines.append(
+                {
+                    "type": "user",
+                    "timestamp": f"2025-01-01T10:0{i}:00.000Z",
+                    "message": {"role": "user", "content": f"prompt number {i}"},
+                }
+            )
+            lines.append(
+                {
+                    "type": "assistant",
+                    "timestamp": f"2025-01-01T10:0{i}:30.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": f"reply {i}"}],
+                    },
+                }
+            )
+        lines.append(
+            {
+                "type": "user",
+                "timestamp": "2025-01-01T10:04:00.000Z",
+                "message": {"role": "user", "content": "the rich prompt"},
+            }
+        )
+        lines.append(
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-01T10:04:30.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "deep thought " * 30},
+                        {"type": "text", "text": INSIGHT_BLOCK_TEXT},
+                        {
+                            "type": "tool_use",
+                            "name": "ExitPlanMode",
+                            "input": {"allowedPrompts": []},
+                            "id": "t-plan",
+                        },
+                        {"type": "text", "text": "mid reply"},
+                    ],
+                },
+            }
+        )
+        # Continuation conversation -> conv index 5 -> page 2.
+        lines.append(
+            {
+                "type": "user",
+                "timestamp": "2025-01-01T10:05:00.000Z",
+                "isCompactSummary": True,
+                "message": {"role": "user", "content": "continuation summary"},
+            }
+        )
+        lines.append(
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-01T10:05:30.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "final reply after continuation"}
+                    ],
+                },
+            }
+        )
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        return f
+
+    def _card_data(self, html_text):
+        blob = html_text.split('id="session-card-data"')[1]
+        blob = blob.split(">", 1)[1].split("</script>")[0]
+        return json.loads(blob)
+
+    def test_prompt_payload_carries_typed_artifacts(self, tmp_path):
+        f = self._session(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        prompts = self._card_data((out / "index.html").read_text(encoding="utf-8"))[
+            "prompts"
+        ]
+        assert [a["type"] for a in prompts[0]["artifacts"]] == ["completion"]
+        rich = prompts[4]
+        types = [a["type"] for a in rich["artifacts"]]
+        assert types == ["thinking", "insight", "plan", "completion"]
+        thinking, insight, plan, completion = rich["artifacts"]
+        assert thinking["link"].startswith("page-001.html#msg-")
+        assert thinking["id"].endswith("-b0")
+        assert insight["label"] == "Anchors are assigned by content position"
+        assert plan["label"] == "Plan presented"
+        # The final reply arrived in the continuation -> page 2.
+        assert completion["link"].startswith("page-002.html#msg-")
+        assert completion["label"] == "final reply after continuation"
+
+    def test_completion_dedupe_retypes_insight(self, tmp_path):
+        lines = [
+            {
+                "type": "user",
+                "timestamp": "2025-01-01T10:00:00.000Z",
+                "message": {"role": "user", "content": "go"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-01T10:00:30.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": INSIGHT_BLOCK_TEXT}],
+                },
+            },
+        ]
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        out = tmp_path / "out"
+        generate_html(f, out)
+        prompts = self._card_data((out / "index.html").read_text(encoding="utf-8"))[
+            "prompts"
+        ]
+        arts = prompts[0]["artifacts"]
+        assert len(arts) == 1  # retyped, not duplicated
+        assert arts[0]["type"] == "completion"
+        assert arts[0]["label"] == "Anchors are assigned by content position"
+
+    def test_index_items_carry_artifact_links(self, tmp_path):
+        f = self._session(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        index = (out / "index.html").read_text(encoding="utf-8")
+        assert 'class="index-artifacts"' in index
+        assert "index-artifact-plan" in index
+        # Artifacts sit OUTSIDE the item's wrapping <a> (no nested anchors):
+        seg_start = index.find('class="index-item-number">#5')
+        seg = index[seg_start : seg_start + 4000]
+        assert seg.index("</a>") < seg.index("index-artifacts")
+
+    def test_index_artifact_targets_exist_in_pages(self, tmp_path):
+        """Integration drift guard: every index artifact href resolves to a
+        real element id in the page file it points at."""
+        import re as _re
+
+        f = self._session(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        index = (out / "index.html").read_text(encoding="utf-8")
+        hrefs = _re.findall(
+            r'class="index-artifact[^"]*" href="(page-\d+\.html)#([\w.:-]+)"', index
+        )
+        assert hrefs, "expected artifact links on the index"
+        for page_file, anchor in hrefs:
+            page_html = (out / page_file).read_text(encoding="utf-8")
+            assert f'id="{anchor}"' in page_html, (page_file, anchor)
+
+    def test_card_js_has_tree_api(self, tmp_path):
+        f = self._session(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        page = (out / "page-001.html").read_text(encoding="utf-8")
+        assert "addArtifact" in page
+        for artifact_type in ("insight", "thinking", "plan", "completion"):
+            assert artifact_type in page  # JS icon map covers the closed set
+
+    def test_web_session_data_gets_artifacts_too(self, tmp_path):
+        from claude_code_transcripts import generate_html_from_session_data
+
+        session_data = {
+            "title": "Web one",
+            "loglines": [
+                {
+                    "type": "user",
+                    "timestamp": "2025-01-01T10:00:00.000Z",
+                    "message": {"role": "user", "content": "hi"},
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2025-01-01T10:00:30.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "the reply"}],
+                    },
+                },
+            ],
+        }
+        out = tmp_path / "out"
+        generate_html_from_session_data(session_data, out)
+        prompts = self._card_data((out / "index.html").read_text(encoding="utf-8"))[
+            "prompts"
+        ]
+        assert [a["type"] for a in prompts[0]["artifacts"]] == ["completion"]
+
+
 class TestLocalSessionCLI:
     """Tests for CLI behavior with local sessions."""
 
