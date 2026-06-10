@@ -171,6 +171,36 @@ class TestNormalizeJsonlObj:
         obj = {"type": "system", "subtype": "turn_duration", "timestamp": "T"}
         assert _normalize_jsonl_obj(obj, include_meta=True) is None
 
+    def test_away_summary_dropped_by_default(self):
+        obj = {
+            "type": "system",
+            "subtype": "away_summary",
+            "content": "Recap.",
+            "isMeta": False,
+            "timestamp": "T",
+        }
+        assert _normalize_jsonl_obj(obj) is None
+
+    def test_away_summary_with_include_meta(self):
+        """Shape verified against real ~/.claude/projects files (v2.1.x):
+        {"type":"system","subtype":"away_summary","content":"...",...}"""
+        obj = {
+            "type": "system",
+            "subtype": "away_summary",
+            "content": "All green. (disable recaps in /config)",
+            "isMeta": False,
+            "timestamp": "T9",
+        }
+        assert _normalize_jsonl_obj(obj, include_meta=True) == {
+            "type": "away-summary",
+            "text": "All green.",
+            "timestamp": "T9",
+        }
+
+    def test_away_summary_without_content_dropped(self):
+        obj = {"type": "system", "subtype": "away_summary", "timestamp": "T"}
+        assert _normalize_jsonl_obj(obj, include_meta=True) is None
+
 
 class TestParseJsonlFileCharacterization:
     """Pin _parse_jsonl_file output across every branch (refactor safety net)."""
@@ -483,6 +513,12 @@ class TestLiveStats:
                         },
                         {"type": "tool_use", "id": "b", "name": "Edit", "input": {}},
                     ],
+                    "usage": {
+                        "input_tokens": 10,
+                        "cache_creation_input_tokens": 20,
+                        "cache_read_input_tokens": 30,
+                        "output_tokens": 40,
+                    },
                 },
             },
             {
@@ -515,7 +551,51 @@ class TestLiveStats:
             "messages": 4,
             "tool_calls": 2,
             "commits": 1,
+            "context_tokens": 60,
+            "output_tokens": 40,
         }
+
+    def test_token_fields_track_latest_context_and_sum_output(self):
+        def assistant(usage, ts):
+            return {
+                "type": "assistant",
+                "timestamp": ts,
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "reply"}],
+                    "usage": usage,
+                },
+            }
+
+        state = new_live_stats()
+        accumulate_live_stats(
+            state,
+            assistant(
+                {
+                    "input_tokens": 1,
+                    "cache_creation_input_tokens": 2,
+                    "cache_read_input_tokens": 3,
+                    "output_tokens": 10,
+                },
+                "T1",
+            ),
+        )
+        assert live_stats_payload(state)["context_tokens"] == 6
+        accumulate_live_stats(
+            state,
+            assistant(
+                {
+                    "input_tokens": 100,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 200,
+                    "output_tokens": 5,
+                },
+                "T2",
+            ),
+        )
+        payload = live_stats_payload(state)
+        assert payload["context_tokens"] == 300  # latest wins, not summed
+        assert payload["output_tokens"] == 15  # summed
 
 
 class TestCardDataHelpers:

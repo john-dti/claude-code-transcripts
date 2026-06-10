@@ -887,13 +887,23 @@ def _normalize_jsonl_obj(obj, include_meta=False):
     With ``include_meta=True`` (the tail path only), additionally returns
     typed meta entries the live view reacts to but the static parser must
     never see: ``{"type": "ai-title", "title": ...}`` for session-name
-    changes. The default keeps the static contract byte-identical.
+    changes and ``{"type": "away-summary", "text": ..., "timestamp": ...}``
+    for recap updates. The default keeps the static contract byte-identical.
     """
     entry_type = obj.get("type")
 
     if include_meta and entry_type == "ai-title":
         if obj.get("aiTitle"):
             return {"type": "ai-title", "title": obj["aiTitle"]}
+        return None
+
+    if include_meta and entry_type == "system":
+        if obj.get("subtype") == "away_summary" and obj.get("content"):
+            return {
+                "type": "away-summary",
+                "text": strip_recap_suffix(obj["content"]).strip(),
+                "timestamp": obj.get("timestamp", ""),
+            }
         return None
 
     # Skip non-message entries
@@ -1632,7 +1642,14 @@ def index_prompt(entry):
 
 def new_live_stats():
     """Fresh cumulative-counter state for one SSE connection."""
-    return {"prompts": 0, "messages": 0, "tool_counts": {}, "commits": 0}
+    return {
+        "prompts": 0,
+        "messages": 0,
+        "tool_counts": {},
+        "commits": 0,
+        "context_tokens": None,
+        "output_tokens": 0,
+    }
 
 
 def accumulate_live_stats(state, entry):
@@ -1657,6 +1674,17 @@ def accumulate_live_stats(state, entry):
     is_prompt, _ = index_prompt(entry)
     if is_prompt:
         state["prompts"] += 1
+    if entry.get("type") == "assistant":
+        usage = entry.get("message", {}).get("usage")
+        if isinstance(usage, dict):
+            # Same semantics as compute_usage_totals: latest context, summed
+            # output.
+            state["output_tokens"] += usage.get("output_tokens", 0) or 0
+            state["context_tokens"] = (
+                (usage.get("input_tokens", 0) or 0)
+                + (usage.get("cache_creation_input_tokens", 0) or 0)
+                + (usage.get("cache_read_input_tokens", 0) or 0)
+            )
     return state
 
 
@@ -1667,6 +1695,8 @@ def live_stats_payload(state):
         "messages": state["messages"],
         "tool_calls": sum(state["tool_counts"].values()),
         "commits": state["commits"],
+        "context_tokens": state["context_tokens"],
+        "output_tokens": state["output_tokens"],
     }
 
 
