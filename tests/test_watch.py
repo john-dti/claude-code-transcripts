@@ -48,6 +48,30 @@ def _ai_title_line(title):
     return (json.dumps(obj) + "\n").encode("utf-8")
 
 
+def _assistant_line(text, usage=None, ts="T"):
+    """One JSONL assistant line, optionally carrying message.usage."""
+    msg = {"role": "assistant", "content": [{"type": "text", "text": text}]}
+    if usage:
+        msg["usage"] = usage
+    obj = {"type": "assistant", "timestamp": ts, "message": msg}
+    return (json.dumps(obj) + "\n").encode("utf-8")
+
+
+def _away_summary_line(content, ts="T"):
+    """One away_summary system line — Claude Code's persisted recap.
+
+    Shape verified against real ~/.claude/projects files (v2.1.x, 2026-06-10).
+    """
+    obj = {
+        "type": "system",
+        "subtype": "away_summary",
+        "content": content,
+        "isMeta": False,
+        "timestamp": ts,
+    }
+    return (json.dumps(obj) + "\n").encode("utf-8")
+
+
 def _write_session(path, data, mtime):
     """Write a session file under `path` and stamp its mtime."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -925,6 +949,134 @@ class TestLiveServer:
                     ),
                 )
                 assert _data_for(fenced, "title") == []
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_card_shell_served(self, tmp_path):
+        """The live shell carries the session card mount and its JS API,
+        without losing the existing prompt TOC."""
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(_user_line("hello", "2025-01-01T10:00:00.000Z"))
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            body = httpx.get(f"http://127.0.0.1:{port}/", timeout=5).text
+            assert 'id="session-card"' in body
+            assert "sessionCard" in body  # CARD_JS wired in
+            assert 'id="toc-list"' in body  # existing TOC untouched
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_recap_event_streams_and_dedupes(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(
+            _user_line("first prompt", "2025-01-01T10:00:00.000Z")
+            + _away_summary_line("Initial recap. (disable recaps in /config)")
+        )
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                initial = _collect_sse(
+                    lines, lambda evs: any(ev == "recap" for ev, _ in evs)
+                )
+                # UI-hint suffix stripped on the wire
+                assert _data_for(initial, "recap") == [{"text": "Initial recap."}]
+
+                with open(p, "ab") as f:
+                    f.write(_away_summary_line("Updated recap."))
+                    f.flush()
+                    os.fsync(f.fileno())
+                more = _collect_sse(
+                    lines, lambda evs: any(ev == "recap" for ev, _ in evs)
+                )
+                assert _data_for(more, "recap") == [{"text": "Updated recap."}]
+
+                # Duplicate recap must not re-emit; user line = stats fence.
+                with open(p, "ab") as f:
+                    f.write(_away_summary_line("Updated recap."))
+                    f.write(_user_line("second prompt", "2025-01-01T10:05:00.000Z"))
+                    f.flush()
+                    os.fsync(f.fileno())
+                fenced = _collect_sse(
+                    lines,
+                    lambda evs: any(
+                        ev == "stats" and json.loads(d)["prompts"] == 2 for ev, d in evs
+                    ),
+                )
+                assert _data_for(fenced, "recap") == []
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_stats_event_carries_token_fields(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(
+            _user_line("first prompt", "2025-01-01T10:00:00.000Z")
+            + _assistant_line(
+                "reply one",
+                usage={
+                    "input_tokens": 10,
+                    "cache_creation_input_tokens": 5,
+                    "cache_read_input_tokens": 0,
+                    "output_tokens": 7,
+                },
+                ts="2025-01-01T10:00:30.000Z",
+            )
+        )
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                initial = _collect_sse(
+                    lines, lambda evs: any(ev == "stats" for ev, _ in evs)
+                )
+                payload = _data_for(initial, "stats")[-1]
+                assert payload["context_tokens"] == 15
+                assert payload["output_tokens"] == 7
+
+                with open(p, "ab") as f:
+                    f.write(
+                        _assistant_line(
+                            "reply two",
+                            usage={
+                                "input_tokens": 1,
+                                "cache_creation_input_tokens": 0,
+                                "cache_read_input_tokens": 100,
+                                "output_tokens": 3,
+                            },
+                            ts="2025-01-01T10:01:00.000Z",
+                        )
+                    )
+                    f.flush()
+                    os.fsync(f.fileno())
+                more = _collect_sse(
+                    lines,
+                    lambda evs: any(
+                        ev == "stats" and json.loads(d)["output_tokens"] == 10
+                        for ev, d in evs
+                    ),
+                )
+                payload = _data_for(more, "stats")[-1]
+                assert payload["context_tokens"] == 101  # latest, not summed
+                assert payload["output_tokens"] == 10  # summed
         finally:
             server.shutdown()
             server.server_close()

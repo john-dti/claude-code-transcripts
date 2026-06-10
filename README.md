@@ -126,6 +126,8 @@ Press `Ctrl-C` to stop the server. The page reconnects automatically and re-sync
 
 The tab title follows the session's auto-generated name (the same name `claude --resume` shows) and renames itself live as the session evolves, so multiple watch tabs stay identifiable.
 
+The [session info card](#session-info-card) is live too: counts and context size update as Claude works, the recap follows Claude Code's away-summaries (with the latest assistant reply standing in until one exists), every prompt is jumpable from the card, and "latest" drops you back to the streaming tail.
+
 ### Web sessions
 
 Import sessions directly from the Claude API:

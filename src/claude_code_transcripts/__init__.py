@@ -1873,6 +1873,10 @@ LIVE_JS = r"""
   var messages = document.getElementById('messages');
   var tocList = document.getElementById('toc-list');
   var statusEl = document.getElementById('live-status');
+  // Live mode: no embedded JSON payload — build an empty card and let the
+  // SSE handlers below feed it.
+  var card = window.sessionCard || null;
+  if (card) card.init(null);
 
   function nearBottom() {
     return (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 120);
@@ -1892,6 +1896,7 @@ LIVE_JS = r"""
     if (messages) messages.innerHTML = '';
     if (tocList) tocList.innerHTML = '';
     setCount('stat-prompts', 0); setCount('stat-messages', 0); setCount('stat-tools', 0); setCount('stat-commits', 0);
+    if (card) card.reset();
   });
   es.addEventListener('append', function (e) {
     var payload = JSON.parse(e.data);
@@ -1902,10 +1907,20 @@ LIVE_JS = r"""
     if (!node || !messages) return;
     messages.appendChild(node);
     enhance(node);
+    // Client-side recap fallback: the latest assistant text stands in until
+    // a real away-summary recap arrives (which then pins the section).
+    if (card) {
+      var ats = node.querySelectorAll('.assistant-text');
+      if (ats.length) {
+        var txt = (ats[ats.length - 1].innerText || '').replace(/\s+/g, ' ').trim();
+        if (txt) card.setRecap(txt.length > 280 ? txt.slice(0, 277) + '...' : txt, false);
+      }
+    }
     if (stick) window.scrollTo(0, document.body.scrollHeight);
   });
   es.addEventListener('prompt', function (e) {
     var p = JSON.parse(e.data);
+    if (card) card.addPrompt(p); // no link on the wire -> in-page '#'+id
     if (!tocList) return;
     var li = document.createElement('li');
     var a = document.createElement('a');
@@ -1920,6 +1935,10 @@ LIVE_JS = r"""
     setCount('stat-messages', s.messages);
     setCount('stat-tools', s.tool_calls);
     setCount('stat-commits', s.commits);
+    if (card) {
+      card.setStats(s);
+      card.setUsage({ context_tokens: s.context_tokens, output_tokens: s.output_tokens });
+    }
   });
   es.addEventListener('title', function (e) {
     var t = JSON.parse(e.data).title;
@@ -1927,6 +1946,11 @@ LIVE_JS = r"""
     document.title = t + ' (live)';
     var h = document.getElementById('session-title');
     if (h) h.textContent = t; // textContent: never parsed as HTML
+    if (card) card.setTitle(t);
+  });
+  es.addEventListener('recap', function (e) {
+    var r = JSON.parse(e.data);
+    if (card && r.text) card.setRecap(r.text, true);
   });
 })();
 """
@@ -1977,7 +2001,13 @@ class _LiveHandler(BaseHTTPRequestHandler):
             session_title = None  # file may not exist yet — title arrives live
         body = (
             get_template("live.html")
-            .render(css=CSS + LIVE_CSS, js=LIVE_JS, session_title=session_title)
+            .render(
+                # CARD_JS before LIVE_JS: the SSE handlers call into
+                # window.sessionCard, so the card API must exist first.
+                css=CSS + LIVE_CSS + CARD_CSS,
+                js=CARD_JS + LIVE_JS,
+                session_title=session_title,
+            )
             .encode("utf-8")
         )
         self.send_response(200)
@@ -2012,6 +2042,7 @@ class _LiveHandler(BaseHTTPRequestHandler):
             offset = 0
             state = new_live_stats()
             last_title = None
+            last_recap = None
             while not stop_event.is_set():
                 if not path.exists():
                     if stop_event.wait(poll):
@@ -2023,6 +2054,7 @@ class _LiveHandler(BaseHTTPRequestHandler):
                     offset = 0
                     state = new_live_stats()
                     last_title = None
+                    last_recap = None
                 loglines, offset = read_new_loglines(path, offset)
                 changed = False
                 for entry in loglines:
@@ -2032,6 +2064,13 @@ class _LiveHandler(BaseHTTPRequestHandler):
                             last_title = entry["title"]
                             self._sse_write(
                                 format_sse_event("title", {"title": last_title})
+                            )
+                        continue
+                    if entry.get("type") == "away-summary":
+                        if entry["text"] and entry["text"] != last_recap:
+                            last_recap = entry["text"]
+                            self._sse_write(
+                                format_sse_event("recap", {"text": last_recap})
                             )
                         continue
                     fragment = render_logline(entry)
