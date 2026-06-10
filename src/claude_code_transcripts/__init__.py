@@ -2740,42 +2740,12 @@ def generate_index_pagination_html(total_pages):
     return _macros.index_pagination(total_pages)
 
 
-def generate_html(json_path, output_dir, github_repo=None, title=None, recap=None):
-    output_dir = Path(output_dir)
-    output_dir.mkdir(exist_ok=True)
+def _build_conversations(loglines):
+    """Group loglines into prompt-led conversations.
 
-    if title is None:
-        # CLI path: one scan yields both the name and the recap. Batch callers
-        # (generate_batch_html) pass both in from the scan they already did.
-        json_path_p = Path(json_path)
-        if json_path_p.suffix == ".jsonl":
-            meta = scan_session_metadata(json_path_p, max_length=80)
-            if meta.title and meta.title != "(no summary)":
-                title = meta.title
-            if recap is None:
-                recap = meta.recap
-        else:
-            title = get_session_title(json_path)
-
-    # Load session file (supports both JSON and JSONL)
-    data = parse_session_file(json_path)
-
-    loglines = data.get("loglines", [])
-
-    # Auto-detect GitHub repo if not provided
-    if github_repo is None:
-        github_repo = detect_github_repo(loglines)
-        if github_repo:
-            print(f"Auto-detected GitHub repo: {github_repo}")
-        else:
-            print(
-                "Warning: Could not auto-detect GitHub repo. Commit links will be disabled."
-            )
-
-    # Set module-level variable for render functions
-    global _github_repo
-    _github_repo = github_repo
-
+    Each conversation starts at a user message with visible text and carries
+    every following entry until the next one. Shared by both generators.
+    """
     conversations = []
     current_conv = None
     for entry in loglines:
@@ -2808,6 +2778,16 @@ def generate_html(json_path, output_dir, github_repo=None, title=None, recap=Non
             current_conv["messages"].append((log_type, message_json, timestamp))
     if current_conv:
         conversations.append(current_conv)
+    return conversations
+
+
+def _render_session_pages(loglines, output_dir, title, recap, echo=print):
+    """Shared session-page core: stats, timeline, card payload, pages + index.
+
+    Callers resolve title/recap and set the _github_repo global first; `echo`
+    is print (file path) or click.echo (web path) for progress lines.
+    """
+    conversations = _build_conversations(loglines)
 
     total_convs = len(conversations)
     total_pages = (total_convs + PROMPTS_PER_PAGE - 1) // PROMPTS_PER_PAGE
@@ -2942,7 +2922,7 @@ def generate_html(json_path, output_dir, github_repo=None, title=None, recap=Non
         (output_dir / f"page-{page_num:03d}.html").write_text(
             page_content, encoding="utf-8"
         )
-        print(f"Generated page-{page_num:03d}.html")
+        echo(f"Generated page-{page_num:03d}.html")
 
     index_pagination = generate_index_pagination_html(total_pages)
     index_template = get_template("index.html")
@@ -2961,9 +2941,48 @@ def generate_html(json_path, output_dir, github_repo=None, title=None, recap=Non
     )
     index_path = output_dir / "index.html"
     index_path.write_text(index_content, encoding="utf-8")
-    print(
+    echo(
         f"Generated {index_path.resolve()} ({total_convs} prompts, {total_pages} pages)"
     )
+
+
+def generate_html(json_path, output_dir, github_repo=None, title=None, recap=None):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+
+    if title is None:
+        # CLI path: one scan yields both the name and the recap. Batch callers
+        # (generate_batch_html) pass both in from the scan they already did.
+        json_path_p = Path(json_path)
+        if json_path_p.suffix == ".jsonl":
+            meta = scan_session_metadata(json_path_p, max_length=80)
+            if meta.title and meta.title != "(no summary)":
+                title = meta.title
+            if recap is None:
+                recap = meta.recap
+        else:
+            title = get_session_title(json_path)
+
+    # Load session file (supports both JSON and JSONL)
+    data = parse_session_file(json_path)
+
+    loglines = data.get("loglines", [])
+
+    # Auto-detect GitHub repo if not provided
+    if github_repo is None:
+        github_repo = detect_github_repo(loglines)
+        if github_repo:
+            print(f"Auto-detected GitHub repo: {github_repo}")
+        else:
+            print(
+                "Warning: Could not auto-detect GitHub repo. Commit links will be disabled."
+            )
+
+    # Set module-level variable for render functions
+    global _github_repo
+    _github_repo = github_repo
+
+    _render_session_pages(loglines, output_dir, title, recap, echo=print)
 
 
 @click.group(cls=DefaultGroup, default="local", default_if_no_args=True)
@@ -3370,194 +3389,7 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
     global _github_repo
     _github_repo = github_repo
 
-    conversations = []
-    current_conv = None
-    for entry in loglines:
-        log_type = entry.get("type")
-        timestamp = entry.get("timestamp", "")
-        is_compact_summary = entry.get("isCompactSummary", False)
-        message_data = entry.get("message", {})
-        if not message_data:
-            continue
-        # Convert message dict to JSON string for compatibility with existing render functions
-        message_json = json.dumps(message_data)
-        is_user_prompt = False
-        user_text = None
-        if log_type == "user":
-            content = message_data.get("content", "")
-            text = extract_text_from_content(content)
-            if text:
-                is_user_prompt = True
-                user_text = text
-        if is_user_prompt:
-            if current_conv:
-                conversations.append(current_conv)
-            current_conv = {
-                "user_text": user_text,
-                "timestamp": timestamp,
-                "messages": [(log_type, message_json, timestamp)],
-                "is_continuation": bool(is_compact_summary),
-            }
-        elif current_conv:
-            current_conv["messages"].append((log_type, message_json, timestamp))
-    if current_conv:
-        conversations.append(current_conv)
-
-    total_convs = len(conversations)
-    total_pages = (total_convs + PROMPTS_PER_PAGE - 1) // PROMPTS_PER_PAGE
-
-    # Stats, commits, and the prompt timeline are computed BEFORE page
-    # rendering so the session-card payload can be embedded in every page.
-    total_tool_counts = {}
-    total_messages = 0
-    all_commits = []  # (timestamp, hash, message, page_num, conv_index)
-    for i, conv in enumerate(conversations):
-        total_messages += len(conv["messages"])
-        stats = analyze_conversation(conv["messages"])
-        for tool, count in stats["tool_counts"].items():
-            total_tool_counts[tool] = total_tool_counts.get(tool, 0) + count
-        page_num = (i // PROMPTS_PER_PAGE) + 1
-        for commit_hash, commit_msg, commit_ts in stats["commits"]:
-            all_commits.append((commit_ts, commit_hash, commit_msg, page_num, i))
-    total_tool_calls = sum(total_tool_counts.values())
-    total_commits = len(all_commits)
-
-    # Build timeline items: prompts and commits merged by timestamp
-    timeline_items = []
-    card_prompts = []
-
-    # Add prompts
-    prompt_num = 0
-    for i, conv in enumerate(conversations):
-        if conv.get("is_continuation"):
-            continue
-        if conv["user_text"].startswith("Stop hook feedback:"):
-            continue
-        prompt_num += 1
-        page_num = (i // PROMPTS_PER_PAGE) + 1
-        msg_id = make_msg_id(conv["timestamp"])
-        link = f"page-{page_num:03d}.html#{msg_id}"
-        rendered_content = render_markdown_text(conv["user_text"])
-        card_prompts.append(
-            {
-                "num": prompt_num,
-                "id": msg_id,
-                "link": link,
-                "preview": prompt_preview(conv["user_text"]),
-                "timestamp": conv["timestamp"],
-            }
-        )
-
-        # Collect all messages including from subsequent continuation conversations
-        # This ensures long_texts from continuations appear with the original prompt
-        all_messages = list(conv["messages"])
-        for j in range(i + 1, len(conversations)):
-            if not conversations[j].get("is_continuation"):
-                break
-            all_messages.extend(conversations[j]["messages"])
-
-        # Analyze conversation for stats (excluding commits from inline display now)
-        stats = analyze_conversation(all_messages)
-        tool_stats_str = format_tool_stats(stats["tool_counts"])
-
-        long_texts_html = ""
-        for lt in stats["long_texts"]:
-            rendered_lt = render_markdown_text(lt)
-            long_texts_html += _macros.index_long_text(rendered_lt)
-
-        stats_html = _macros.index_stats(tool_stats_str, long_texts_html)
-
-        item_html = _macros.index_item(
-            prompt_num, link, conv["timestamp"], rendered_content, stats_html
-        )
-        timeline_items.append((conv["timestamp"], "prompt", item_html))
-
-    # Add commits as separate timeline items
-    for commit_ts, commit_hash, commit_msg, page_num, conv_idx in all_commits:
-        item_html = _macros.index_commit(
-            commit_hash, commit_msg, commit_ts, _github_repo
-        )
-        timeline_items.append((commit_ts, "commit", item_html))
-
-    # Sort by timestamp
-    timeline_items.sort(key=lambda x: x[0])
-    index_items = [item[2] for item in timeline_items]
-
-    # Jump-to-latest targets the last message on the last page.
-    if conversations:
-        last_ts = conversations[-1]["messages"][-1][2]
-        latest_page = (len(conversations) - 1) // PROMPTS_PER_PAGE + 1
-        latest_link = f"page-{latest_page:03d}.html#{make_msg_id(last_ts)}"
-    else:
-        latest_link = None
-
-    card_data = build_card_data(
-        title,
-        prompt_num,
-        total_messages,
-        total_tool_calls,
-        total_commits,
-        loglines,
-        recap,
-        card_prompts,
-        latest_link,
-    )
-    # "</" must not appear raw inside a <script> block; "<\/" is the
-    # equivalent JSON escape, preventing </script> breakout.
-    card_json = json.dumps(card_data).replace("</", "<\\/")
-
-    for page_num in range(1, total_pages + 1):
-        start_idx = (page_num - 1) * PROMPTS_PER_PAGE
-        end_idx = min(start_idx + PROMPTS_PER_PAGE, total_convs)
-        page_convs = conversations[start_idx:end_idx]
-        messages_html = []
-        for conv in page_convs:
-            is_first = True
-            for log_type, message_json, timestamp in conv["messages"]:
-                msg_html = render_message(log_type, message_json, timestamp)
-                if msg_html:
-                    # Wrap continuation summaries in collapsed details
-                    if is_first and conv.get("is_continuation"):
-                        msg_html = f'<details class="continuation"><summary>Session continuation summary</summary>{msg_html}</details>'
-                    messages_html.append(msg_html)
-                is_first = False
-        pagination_html = generate_pagination_html(page_num, total_pages)
-        page_template = get_template("page.html")
-        page_content = page_template.render(
-            css=CSS + CARD_CSS,
-            js=JS + CARD_JS,
-            session_title=title,
-            card_json=card_json,
-            page_num=page_num,
-            total_pages=total_pages,
-            pagination_html=pagination_html,
-            messages_html="".join(messages_html),
-        )
-        (output_dir / f"page-{page_num:03d}.html").write_text(
-            page_content, encoding="utf-8"
-        )
-        click.echo(f"Generated page-{page_num:03d}.html")
-
-    index_pagination = generate_index_pagination_html(total_pages)
-    index_template = get_template("index.html")
-    index_content = index_template.render(
-        css=CSS + CARD_CSS,
-        js=JS + CARD_JS,
-        session_title=title,
-        card_json=card_json,
-        pagination_html=index_pagination,
-        prompt_num=prompt_num,
-        total_messages=total_messages,
-        total_tool_calls=total_tool_calls,
-        total_commits=total_commits,
-        total_pages=total_pages,
-        index_items_html="".join(index_items),
-    )
-    index_path = output_dir / "index.html"
-    index_path.write_text(index_content, encoding="utf-8")
-    click.echo(
-        f"Generated {index_path.resolve()} ({total_convs} prompts, {total_pages} pages)"
-    )
+    _render_session_pages(loglines, output_dir, title, recap, echo=click.echo)
 
 
 @cli.command("web")
