@@ -1910,6 +1910,45 @@ class TestSessionCard:
         assert "recordContext" in page
         assert "cct-usage-detail" in page  # persisted toggle
 
+    def test_card_js_has_inline_icon_links(self, tmp_path):
+        """Artifacts surface as inline icon deep-links on the prompt row, not
+        only behind the collapsed toggle."""
+        f = self._session_jsonl(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        page = (out / "page-001.html").read_text(encoding="utf-8")
+        assert "card-prompt-icons" in page
+        assert "card-icon-link" in page
+
+    def test_markdown_tables_styled(self, tmp_path):
+        """GFM tables in transcript content get borders (they rendered as
+        bare unstyled tables before)."""
+        table_md = "| Finding | Number |\n| --- | --- |\n| sinks | 45.5% |"
+        lines = [
+            {
+                "type": "user",
+                "timestamp": "2025-01-01T10:00:00.000Z",
+                "message": {"role": "user", "content": "show a table"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-01T10:00:30.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": table_md}],
+                },
+            },
+        ]
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        out = tmp_path / "out"
+        generate_html(f, out)
+        page = (out / "page-001.html").read_text(encoding="utf-8")
+        assert "<table>" in page  # markdown table rendered
+        assert ".message-content table" in page  # border styling shipped
+
 
 class TestTitleChapters:
     """ai-title changes appear as chapter dividers in the card prompt list

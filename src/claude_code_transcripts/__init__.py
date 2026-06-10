@@ -1795,10 +1795,24 @@ def render_logline(entry):
     return fragment
 
 
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
 def prompt_preview(text):
     """Collapse whitespace and cap at 100 chars — the canonical prompt preview
     shared by the live TOC, the static index, and the session card, so all
-    three render identical previews for the same prompt."""
+    three render identical previews for the same prompt.
+
+    Wrapper prompts are humanized: slash-command wrappers become
+    "/name args"; other angle-bracket wrappers (<task-notification>, ...)
+    lose their tags so the readable remainder shows.
+    """
+    if text.startswith("<"):
+        name, body = _parse_command(text)
+        if name:
+            text = f"{name} {body}".strip()
+        else:
+            text = _TAG_RE.sub(" ", text)
     preview = " ".join(text.split())
     if len(preview) > 100:
         preview = preview[:97] + "..."
@@ -2521,6 +2535,9 @@ pre { background: var(--code-bg); color: var(--code-text); padding: 12px; border
 pre.json { color: #e0e0e0; }
 code { background: rgba(0,0,0,0.08); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
 pre code { background: none; padding: 0; }
+.message-content table, .index-item-content table, .index-item-long-text table { border-collapse: collapse; margin: 12px 0; display: block; max-width: 100%; overflow-x: auto; font-size: 0.9rem; }
+.message-content th, .message-content td, .index-item-content th, .index-item-content td, .index-item-long-text th, .index-item-long-text td { border: 1px solid #d5d5d5; padding: 6px 10px; text-align: left; vertical-align: top; }
+.message-content th, .index-item-content th, .index-item-long-text th { background: rgba(0,0,0,0.045); font-weight: 600; }
 .user-content { margin: 0; }
 .truncatable { position: relative; }
 .truncatable.truncated .truncatable-content { max-height: 200px; overflow: hidden; }
@@ -2727,6 +2744,11 @@ CARD_CSS = """
 #session-card .card-artifact a { color: var(--text-muted); text-decoration: none; }
 #session-card .card-artifact a:hover { color: var(--text-color); text-decoration: underline; }
 #session-card .card-artifact-icon { display: inline-block; width: 1.3em; }
+#session-card .card-prompt-icons { display: block; padding: 0 0 2px 2px; line-height: 1.3; }
+#session-card .card-prompt-icons a.card-icon-link { display: inline; margin-right: 4px; text-decoration: none; font-size: 0.8rem; }
+#session-card .card-prompt-icons a.card-icon-link:hover { filter: brightness(0.7); }
+#session-card .card-icon-more { background: rgba(0,0,0,0.06); border: none; border-radius: 8px; font-size: 0.7rem; padding: 0 5px; cursor: pointer; color: var(--text-muted); vertical-align: middle; }
+#session-card .card-icon-more:hover { background: rgba(0,0,0,0.12); }
 #session-card .card-prompt-list li { margin: 2px 0; }
 #session-card .card-prompt-list a { color: inherit; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; max-width: 100%; }
 #session-card .card-prompt-list a:hover { text-decoration: underline; }
@@ -2995,6 +3017,39 @@ CARD_JS = r"""
     });
     (p.artifacts || []).forEach(function (art) { addArtifact(p.num, art); });
   }
+  var ICON_CAP = 8; // inline icons per prompt; overflow folds into "+N"
+  function addInlineIcon(item, a) {
+    if (!item.iconWrap) {
+      item.iconWrap = el('span', 'card-prompt-icons');
+      // Order within the row: toggle, prompt link, icons, sublist.
+      item.li.insertBefore(item.iconWrap, item.sublist || null);
+      item.iconCount = 0;
+      item.moreCount = 0;
+    }
+    // Rare, high-value types always get an icon; thinking respects the cap.
+    if (a.type !== 'thinking' || item.iconCount < ICON_CAP) {
+      var link = el('a', 'card-icon-link card-icon-' + a.type, ICONS[a.type] || '•');
+      link.href = a.link || ('#' + a.id);
+      link.title = a.label || a.type; // tooltip carries the label
+      item.iconWrap.appendChild(link);
+      item.iconCount += 1;
+      return link;
+    }
+    item.moreCount += 1;
+    if (!item.moreBtn) {
+      item.moreBtn = el('button', 'card-icon-more', '+1');
+      item.moreBtn.type = 'button';
+      item.moreBtn.title = 'Show all artifact links';
+      item.moreBtn.addEventListener('click', function () {
+        if (!item.sublist) return;
+        item.sublist.hidden = false;
+        item.toggle.textContent = '▾';
+      });
+      item.iconWrap.appendChild(item.moreBtn);
+    }
+    item.moreBtn.textContent = '+' + item.moreCount;
+    return null;
+  }
   function addArtifact(num, a) {
     if (!a || !a.id) return;
     var existing = artifactByAnchor[a.id];
@@ -3003,6 +3058,10 @@ CARD_JS = r"""
       // type/icon but keeps the richer insight label.
       existing.li.className = 'card-artifact card-artifact-' + a.type;
       existing.icon.textContent = ICONS[a.type] || '•';
+      if (existing.inline) {
+        existing.inline.className = 'card-icon-link card-icon-' + a.type;
+        existing.inline.textContent = ICONS[a.type] || '•';
+      }
       return;
     }
     var item = promptItems[num];
@@ -3020,7 +3079,8 @@ CARD_JS = r"""
     li.appendChild(icon);
     li.appendChild(link);
     item.sublist.appendChild(li);
-    artifactByAnchor[a.id] = { li: li, icon: icon };
+    var inline = addInlineIcon(item, a);
+    artifactByAnchor[a.id] = { li: li, icon: icon, inline: inline };
   }
   function addChapter(title) {
     if (!refs.promptList || !title) return;
