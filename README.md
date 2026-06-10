@@ -99,7 +99,8 @@ claude-code-transcripts watch --session ~/.claude/projects/my-project/abc123.jso
 Options:
 
 - `--session PATH` - tail a specific session file instead of the newest
-- `--pick` - choose the session from a list instead of auto-selecting the newest
+- `--pick` - choose the session from a list instead of auto-selecting the newest. The picker shows the same columns as `local` (date, size, git branch, project, slash command, summary).
+- `--limit N` - maximum sessions to show with `--pick` (default: 10)
 - `-s, --source DIRECTORY` - projects folder to search (default: `~/.claude/projects`)
 - `--port N` - port to serve on (default: an OS-assigned free port)
 - `--repo OWNER/NAME` - GitHub repo for commit links (auto-detected if not specified)

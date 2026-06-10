@@ -711,3 +711,89 @@ class TestWatchCommand:
 
         assert result.exit_code == 0, result.output
         assert "chosen.jsonl" in result.output  # picked, not the newer one
+
+    def test_help_lists_limit(self):
+        result = CliRunner().invoke(cli, ["watch", "--help"])
+        assert result.exit_code == 0
+        assert "--limit" in result.output
+
+    def test_pick_rows_match_local_format(
+        self, tmp_path, monkeypatch, mock_webbrowser_open
+    ):
+        """--pick rows carry the same branch/project/command columns as `local`.
+
+        The old watch picker printed only date · size · summary, which made
+        eight identical "/plan ..." sessions indistinguishable.
+        """
+        line = {
+            "type": "user",
+            "timestamp": "T",
+            "gitBranch": "dti/x",
+            "message": {
+                "role": "user",
+                "content": (
+                    "<command-message>plan</command-message>\n"
+                    "<command-name>/plan</command-name>\n"
+                    "<command-args>build the widget</command-args>"
+                ),
+            },
+        }
+        _write_session(
+            tmp_path / "D--projects-devjig" / "s.jsonl",
+            (json.dumps(line) + "\n").encode("utf-8"),
+            2000,
+        )
+
+        captured = {}
+
+        def fake_select(message, choices=None, **kwargs):
+            captured["choices"] = choices
+
+            class _P:
+                def ask(self):
+                    return choices[0].value
+
+            return _P()
+
+        monkeypatch.setattr("claude_code_transcripts.questionary.select", fake_select)
+        monkeypatch.setattr(
+            "claude_code_transcripts._LiveServer.serve_forever", lambda self: None
+        )
+
+        result = CliRunner().invoke(cli, ["watch", "--pick", "--source", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        row = captured["choices"][0].title
+        assert "[dti/x]" in row
+        assert "devjig" in row  # decoded project display name
+        assert "/plan" in row
+        assert "build the widget" in row
+
+    def test_pick_respects_limit(self, tmp_path, monkeypatch, mock_webbrowser_open):
+        for i in range(3):
+            _write_session(
+                tmp_path / "p" / f"s{i}.jsonl", _user_line(f"prompt {i}"), 2000 + i
+            )
+
+        captured = {}
+
+        def fake_select(message, choices=None, **kwargs):
+            captured["choices"] = choices
+
+            class _P:
+                def ask(self):
+                    return choices[0].value
+
+            return _P()
+
+        monkeypatch.setattr("claude_code_transcripts.questionary.select", fake_select)
+        monkeypatch.setattr(
+            "claude_code_transcripts._LiveServer.serve_forever", lambda self: None
+        )
+
+        result = CliRunner().invoke(
+            cli, ["watch", "--pick", "--limit", "2", "--source", str(tmp_path)]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert len(captured["choices"]) == 2

@@ -2556,6 +2556,11 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
     help="Choose the session from a list instead of auto-selecting the newest.",
 )
 @click.option(
+    "--limit",
+    default=10,
+    help="Maximum sessions to show with --pick (default: 10).",
+)
+@click.option(
     "-s",
     "--source",
     type=click.Path(),
@@ -2581,7 +2586,7 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
     default=0.3,
     help="Seconds between file polls (default: 0.3).",
 )
-def watch_cmd(session, pick, source, port, repo, open_browser, poll_interval):
+def watch_cmd(session, pick, limit, source, port, repo, open_browser, poll_interval):
     """Tail an active Claude Code session live in your browser.
 
     Starts a local server and streams the session to the browser as Claude
@@ -2590,21 +2595,11 @@ def watch_cmd(session, pick, source, port, repo, open_browser, poll_interval):
     projects_folder = Path(source) if source else (Path.home() / ".claude" / "projects")
 
     if pick and not session:
-        results = find_local_sessions(projects_folder)
-        if not results:
+        # Same rows as the `local` picker (branch/project/command columns).
+        choices = build_session_choices(projects_folder, limit=limit)
+        if not choices:
             click.echo("No local sessions found.")
             return
-        choices = []
-        for filepath, meta in results:
-            stat = filepath.stat()
-            mod_time = datetime.fromtimestamp(stat.st_mtime)
-            size_kb = stat.st_size / 1024
-            date_str = mod_time.strftime("%Y-%m-%d %H:%M")
-            summary = meta.summary
-            if len(summary) > 50:
-                summary = summary[:47] + "..."
-            display = f"{date_str}  {size_kb:5.0f} KB  {summary}"
-            choices.append(questionary.Choice(title=display, value=filepath))
         session_file = questionary.select(
             "Select a session to watch:", choices=choices
         ).ask()
