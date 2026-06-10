@@ -20,6 +20,7 @@ from claude_code_transcripts import (
     SessionMetadata,
     format_session_choice,
     build_session_choices,
+    strip_recap_suffix,
 )
 
 
@@ -216,6 +217,93 @@ class TestScanSessionMetadata:
         meta = scan_session_metadata(f)
         assert meta.summary == "plain prose prompt"
         assert meta.ai_title == "Name"
+
+
+def _away_summary(content, ts="2026-06-10T13:53:32.990Z"):
+    """One away_summary system entry — Claude Code's "※ recap:" text.
+
+    Shape verified against real ~/.claude/projects files (Claude Code v2.1.x,
+    2026-06-10): {"type":"system","subtype":"away_summary","content":"...",
+    "isMeta":false,"timestamp":"..."}
+    """
+    return {
+        "type": "system",
+        "subtype": "away_summary",
+        "content": content,
+        "isMeta": False,
+        "timestamp": ts,
+    }
+
+
+class TestStripRecapSuffix:
+    """Some away_summary contents carry a UI hint trailer to strip for display."""
+
+    def test_strips_trailing_hint(self):
+        assert (
+            strip_recap_suffix("Work is done. (disable recaps in /config)")
+            == "Work is done."
+        )
+
+    def test_no_suffix_untouched(self):
+        assert strip_recap_suffix("Work is done.") == "Work is done."
+
+    def test_mid_text_mention_untouched(self):
+        text = "You can (disable recaps in /config) at any time, then continue."
+        assert strip_recap_suffix(text) == text
+
+
+class TestScanSessionMetadataRecap:
+    """The latest away_summary is the session's current recap."""
+
+    def test_recap_last_wins(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        _write_jsonl(
+            f,
+            [
+                _user("plain prose prompt"),
+                _away_summary("Old recap of earlier work."),
+                _away_summary("Slice 7 of the plan is shipped; nothing pending."),
+            ],
+        )
+        meta = scan_session_metadata(f)
+        assert meta.recap == "Slice 7 of the plan is shipped; nothing pending."
+
+    def test_recap_suffix_stripped(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        _write_jsonl(
+            f,
+            [
+                _user("plain prose prompt"),
+                _away_summary("All tests green. (disable recaps in /config)"),
+            ],
+        )
+        assert scan_session_metadata(f).recap == "All tests green."
+
+    def test_recap_absent_is_none(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        _write_jsonl(f, [_user("plain prose prompt")])
+        assert scan_session_metadata(f).recap is None
+
+    def test_other_system_subtypes_ignored(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        _write_jsonl(
+            f,
+            [
+                _user("plain prose prompt"),
+                {"type": "system", "subtype": "turn_duration", "timestamp": "T"},
+                {"type": "system", "subtype": "local_command", "content": "ran /foo"},
+                {"type": "system", "subtype": "compact_boundary", "timestamp": "T"},
+            ],
+        )
+        assert scan_session_metadata(f).recap is None
+
+    def test_recap_not_truncated_by_max_length(self, tmp_path):
+        """Recaps feed the info card, not picker rows — keep them whole."""
+        long_recap = "A detailed recap sentence. " * 20
+        f = tmp_path / "s.jsonl"
+        _write_jsonl(f, [_user("hi"), _away_summary(long_recap)])
+        meta = scan_session_metadata(f, max_length=40)
+        assert meta.recap == long_recap.strip()
 
 
 # A fixed epoch so the rendered date is stable across machines/timezones; the

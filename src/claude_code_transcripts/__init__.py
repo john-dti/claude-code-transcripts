@@ -152,6 +152,16 @@ def _truncate(text, max_length):
     return text
 
 
+# Some away_summary contents end with a UI hint Claude Code appends to its
+# "※ recap:" display; strip it only as a trailer so mid-text mentions survive.
+_RECAP_SUFFIX_RE = re.compile(r"\s*\(disable recaps in /config\)\s*$", re.IGNORECASE)
+
+
+def strip_recap_suffix(text):
+    """Remove the trailing "(disable recaps in /config)" UI hint, if present."""
+    return _RECAP_SUFFIX_RE.sub("", text)
+
+
 def extract_command_summary(text):
     """Return a readable "name: args" summary for slash-command messages, else None.
 
@@ -179,6 +189,8 @@ class SessionMetadata:
     ai_title: Claude Code's evolving auto-generated session name (the LAST
         ``type=="ai-title"`` line), or None. This is the name `claude --resume`
         shows; independent of `summary` so picker rows keep the prompt text.
+    recap: the latest away-summary recap (Claude Code's "※ recap:" text), or
+        None. Untruncated — it feeds the session info card, not picker rows.
     """
 
     summary: str
@@ -186,6 +198,7 @@ class SessionMetadata:
     command: str | None
     from_control_fallback: bool
     ai_title: str | None = None
+    recap: str | None = None
 
     @property
     def title(self):
@@ -217,6 +230,7 @@ def scan_session_metadata(filepath, max_length=200):
     control_fallback = None  # (name, body) of the first skipped control command
     branch = None
     ai_title = None
+    recap = None
 
     try:
         with open(filepath, "r", encoding="utf-8") as f:
@@ -236,6 +250,15 @@ def scan_session_metadata(filepath, max_length=200):
                 # session evolves, so keep overwriting until EOF.
                 if obj.get("type") == "ai-title" and obj.get("aiTitle"):
                     ai_title = obj["aiTitle"]
+                    continue
+
+                # Latest away_summary = the session's current recap.
+                if (
+                    obj.get("type") == "system"
+                    and obj.get("subtype") == "away_summary"
+                    and obj.get("content")
+                ):
+                    recap = strip_recap_suffix(obj["content"]).strip()
                     continue
 
                 if (
@@ -291,6 +314,7 @@ def scan_session_metadata(filepath, max_length=200):
         command=chosen_command,
         from_control_fallback=from_control_fallback,
         ai_title=_truncate(ai_title, max_length) if ai_title else None,
+        recap=recap or None,
     )
 
 
