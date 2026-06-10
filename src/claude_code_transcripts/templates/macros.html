@@ -101,9 +101,10 @@
 </div>
 {%- endmacro %}
 
-{# Generic tool use - input_json is pre-formatted so needs |safe #}
-{% macro tool_use(tool_name, description, input_json, tool_id) %}
-<div class="tool-use" data-tool-id="{{ tool_id }}"><div class="tool-header"><span class="tool-icon">⚙</span> {{ tool_name }}</div>
+{# Generic tool use - input_json is pre-formatted so needs |safe.
+   block_id (optional) is the stable msg-<ts>-bN deep-link anchor. #}
+{% macro tool_use(tool_name, description, input_json, tool_id, block_id='') %}
+<div class="tool-use" data-tool-id="{{ tool_id }}"{% if block_id %} id="{{ block_id }}"{% endif %}><div class="tool-header"><span class="tool-icon">⚙</span> {{ tool_name }}</div>
 {%- if description -%}
 <div class="tool-description">{{ description }}</div>
 {%- endif -%}
@@ -124,14 +125,14 @@
 {# Thinking block - content_html is pre-rendered markdown so needs |safe.
    markdown_source carries the pre-render text so the per-message "copy
    markdown" button can reassemble the original markdown from the DOM. #}
-{% macro thinking(content_html, markdown_source='') %}
-<div class="thinking" data-markdown="{{ markdown_source }}"><div class="thinking-label">Thinking</div>{{ content_html|safe }}</div>
+{% macro thinking(content_html, markdown_source='', block_id='') %}
+<div class="thinking" data-markdown="{{ markdown_source }}"{% if block_id %} id="{{ block_id }}"{% endif %}><div class="thinking-label">Thinking</div>{{ content_html|safe }}</div>
 {%- endmacro %}
 
 {# Assistant text - content_html is pre-rendered markdown so needs |safe.
    See thinking() for markdown_source rationale. #}
-{% macro assistant_text(content_html, markdown_source='') %}
-<div class="assistant-text" data-markdown="{{ markdown_source }}">{{ content_html|safe }}</div>
+{% macro assistant_text(content_html, markdown_source='', block_id='') %}
+<div class="assistant-text" data-markdown="{{ markdown_source }}"{% if block_id %} id="{{ block_id }}"{% endif %}>{{ content_html|safe }}</div>
 {%- endmacro %}
 
 {# User content - content_html is pre-rendered so needs |safe.
@@ -168,9 +169,24 @@
 <details class="continuation"><summary>Session continuation summary</summary>{{ content_html|safe }}</details>
 {%- endmacro %}
 
+{# Chapter divider for the index timeline: marks an ai-title change #}
+{% macro index_chapter(title) %}
+<div class="index-chapter">── {{ title }} ──</div>
+{%- endmacro %}
+
 {# Index item (prompt) - rendered_content and stats_html are pre-rendered so need |safe #}
-{% macro index_item(prompt_num, link, timestamp, rendered_content, stats_html) %}
-<div class="index-item"><a href="{{ link }}"><div class="index-item-header"><span class="index-item-number">#{{ prompt_num }}</span><time datetime="{{ timestamp }}" data-timestamp="{{ timestamp }}">{{ timestamp }}</time></div><div class="index-item-content">{{ rendered_content|safe }}</div></a>{{ stats_html|safe }}</div>
+{% macro index_item(prompt_num, link, timestamp, rendered_content, stats_html, artifacts_html='') %}
+<div class="index-item"><a href="{{ link }}"><div class="index-item-header"><span class="index-item-number">#{{ prompt_num }}</span><time datetime="{{ timestamp }}" data-timestamp="{{ timestamp }}">{{ timestamp }}</time></div><div class="index-item-content">{{ rendered_content|safe }}</div></a>{{ stats_html|safe }}{{ artifacts_html|safe }}</div>
+{%- endmacro %}
+
+{# Artifact deep links under an index item. Each artifact dict carries
+   type/icon/label/link; rendered OUTSIDE the item's wrapping <a>. #}
+{% macro index_artifacts(artifacts) %}
+<div class="index-artifacts">
+{%- for a in artifacts -%}
+<a class="index-artifact index-artifact-{{ a.type }}" href="{{ a.link }}"><span class="index-artifact-icon">{{ a.icon }}</span> {{ a.label }}</a>
+{%- endfor -%}
+</div>
 {%- endmacro %}
 
 {# Index commit #}

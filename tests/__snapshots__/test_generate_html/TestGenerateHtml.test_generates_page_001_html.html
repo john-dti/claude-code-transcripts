@@ -125,6 +125,11 @@ details.continuation[open] summary { border-radius: 12px 12px 0 0; margin-bottom
 .index-commit-header { display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem; margin-bottom: 4px; }
 .index-commit-hash { font-family: monospace; color: #e65100; font-weight: 600; }
 .index-commit-msg { color: #5d4037; }
+.index-chapter { text-align: center; color: var(--text-muted); font-weight: 600; font-size: 0.85rem; margin: 20px 0 12px; }
+.index-artifacts { display: flex; flex-direction: column; gap: 2px; padding: 6px 16px 10px 32px; border-top: 1px solid rgba(0,0,0,0.06); font-size: 0.85rem; }
+.index-artifact { color: var(--text-muted); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.index-artifact:hover { color: var(--text-color); text-decoration: underline; }
+.index-artifact-icon { display: inline-block; width: 1.4em; }
 .index-item-long-text { margin-top: 8px; padding: 12px; background: var(--card-bg); border-radius: 8px; border-left: 3px solid var(--assistant-border); }
 .index-item-long-text .truncatable.truncated::after { background: linear-gradient(to bottom, transparent, var(--card-bg)); }
 .index-item-long-text-content { color: var(--text-color); }
@@ -159,10 +164,30 @@ details.continuation[open] summary { border-radius: 12px 12px 0 0; margin-bottom
 #session-card .card-close { background: transparent; border: none; cursor: pointer; font-size: 1.1rem; color: var(--text-muted); padding: 0 2px; line-height: 1; }
 #session-card .card-close:hover { color: var(--text-color); }
 #session-card .card-stats { color: var(--text-muted); margin-bottom: 6px; }
-#session-card .card-usage { color: var(--text-muted); margin-bottom: 8px; }
+#session-card .card-usage { color: var(--text-muted); margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#session-card .card-usage-toggle { background: transparent; border: none; cursor: pointer; color: var(--text-muted); font-size: 0.75rem; padding: 0; }
+#session-card .card-usage-toggle:hover { color: var(--text-color); }
+#session-card .card-usage-detail { margin-bottom: 8px; }
+#session-card .card-usage-model { font-family: monospace; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px; }
+#session-card .card-usage-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; color: var(--text-muted); }
+#session-card .card-usage-table th { text-align: right; font-weight: 600; padding: 1px 4px; }
+#session-card .card-usage-table td { padding: 1px 4px; }
+#session-card .card-usage-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+#session-card .ctx-bars { display: flex; align-items: flex-end; gap: 2px; height: 44px; margin-top: 4px; }
+#session-card .ctx-bar { flex: 1; height: 100%; display: flex; align-items: flex-end; cursor: pointer; background: rgba(0,0,0,0.04); border-radius: 2px; }
+#session-card .ctx-bar:hover { background: rgba(25, 118, 210, 0.12); }
+#session-card .ctx-bar-fill { width: 100%; background: var(--user-border); border-radius: 2px; }
 #session-card .card-section-label { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin: 8px 0 4px; }
 #session-card .card-recap-text { background: var(--thinking-bg); border-left: 3px solid var(--thinking-border); border-radius: 6px; padding: 8px 10px; }
 #session-card .card-prompt-list { margin: 0; padding-left: 22px; max-height: 32vh; overflow-y: auto; }
+#session-card .card-chapter { list-style: none; margin: 6px 0 2px -22px; text-align: center; color: var(--text-muted); font-weight: 600; font-size: 0.75rem; }
+#session-card .card-prompt-toggle { background: transparent; border: none; cursor: pointer; color: var(--text-muted); font-size: 0.75rem; padding: 0 4px 0 0; margin-left: -14px; }
+#session-card .card-prompt-toggle:hover { color: var(--text-color); }
+#session-card .card-artifacts { list-style: none; margin: 2px 0 4px; padding-left: 14px; }
+#session-card .card-artifact { margin: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#session-card .card-artifact a { color: var(--text-muted); text-decoration: none; }
+#session-card .card-artifact a:hover { color: var(--text-color); text-decoration: underline; }
+#session-card .card-artifact-icon { display: inline-block; width: 1.3em; }
 #session-card .card-prompt-list li { margin: 2px 0; }
 #session-card .card-prompt-list a { color: inherit; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; max-width: 100%; }
 #session-card .card-prompt-list a:hover { text-decoration: underline; }
@@ -193,13 +218,13 @@ details.continuation[open] summary { border-radius: 12px 12px 0 0; margin-bottom
 1. Create the function
 2. Add a basic test
 
-This is straightforward."><div class="thinking-label">Thinking</div><p>The user wants a simple addition function. I should:</p>
+This is straightforward." id="msg-2025-12-24T10-00-05-000Z-b0"><div class="thinking-label">Thinking</div><p>The user wants a simple addition function. I should:</p>
 <ol>
 <li>Create the function</li>
 <li>Add a basic test</li>
 </ol>
 <p>This is straightforward.</p></div>
-<div class="assistant-text" data-markdown="I&#39;ll create a simple Python function for you. Let me write it now."><p>I'll create a simple Python function for you. Let me write it now.</p></div><div class="file-tool write-tool" data-tool-id="toolu_write_001">
+<div class="assistant-text" data-markdown="I&#39;ll create a simple Python function for you. Let me write it now." id="msg-2025-12-24T10-00-05-000Z-b1"><p>I'll create a simple Python function for you. Let me write it now.</p></div><div class="file-tool write-tool" data-tool-id="toolu_write_001">
 <div class="file-tool-header write-header"><span class="file-tool-icon">📝</span> Write <span class="file-tool-path">math_utils.py</span></div>
 <div class="file-tool-fullpath">/project/math_utils.py</div>
 <div class="truncatable"><div class="truncatable-content"><pre class="file-content">def add(a: int, b: int) -&gt; int:
@@ -209,7 +234,7 @@ This is straightforward."><div class="thinking-label">Thinking</div><p>The user 
 </div></div></div>
 <div class="message tool-reply" id="msg-2025-12-24T10-00-10-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-10-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:10.000Z" data-timestamp="2025-12-24T10:00:10.000Z">2025-12-24T10:00:10.000Z</time></a></span></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>File written successfully</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
 <div class="message assistant" id="msg-2025-12-24T10-00-15-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-15-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:15.000Z" data-timestamp="2025-12-24T10:00:15.000Z">2025-12-24T10:00:15.000Z</time></a></span></div><div class="message-content">
-<div class="assistant-text" data-markdown="I&#39;ve created the `add` function. Now let me run the tests."><p>I've created the <code>add</code> function. Now let me run the tests.</p></div>
+<div class="assistant-text" data-markdown="I&#39;ve created the `add` function. Now let me run the tests." id="msg-2025-12-24T10-00-15-000Z-b0"><p>I've created the <code>add</code> function. Now let me run the tests.</p></div>
 <div class="tool-use bash-tool" data-tool-id="toolu_bash_001">
 <div class="tool-header"><span class="tool-icon">$</span> Bash</div>
 <div class="tool-description">Run pytest on tests directory</div><div class="truncatable"><div class="truncatable-content"><pre class="bash-command">python -m pytest tests/</pre></div><button class="expand-btn">Show more</button></div>
@@ -221,7 +246,7 @@ tests/test_math.py ..  [100%]
 
 ===== 2 passed in 0.05s =====</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
 <div class="message assistant" id="msg-2025-12-24T10-00-25-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-25-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:25.000Z" data-timestamp="2025-12-24T10:00:25.000Z">2025-12-24T10:00:25.000Z</time></a></span></div><div class="message-content">
-<div class="assistant-text" data-markdown="All tests pass. Let me update the todo list and make a commit."><p>All tests pass. Let me update the todo list and make a commit.</p></div>
+<div class="assistant-text" data-markdown="All tests pass. Let me update the todo list and make a commit." id="msg-2025-12-24T10-00-25-000Z-b0"><p>All tests pass. Let me update the todo list and make a commit.</p></div>
 <div class="todo-list" data-tool-id="toolu_todo_001"><div class="todo-header"><span class="todo-header-icon">☰</span> Task List</div><ul class="todo-items"><li class="todo-item todo-completed"><span class="todo-icon">✓</span><span class="todo-content">Create add function</span></li><li class="todo-item todo-completed"><span class="todo-icon">✓</span><span class="todo-content">Write tests</span></li><li class="todo-item todo-completed"><span class="todo-icon">✓</span><span class="todo-content">Run tests</span></li><li class="todo-item todo-in-progress"><span class="todo-icon">→</span><span class="todo-content">Commit changes</span></li><li class="todo-item todo-pending"><span class="todo-icon">○</span><span class="todo-content">Push to remote</span></li></ul></div></div></div>
 <div class="message tool-reply" id="msg-2025-12-24T10-00-30-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-30-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:30.000Z" data-timestamp="2025-12-24T10:00:30.000Z">2025-12-24T10:00:30.000Z</time></a></span></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>Todos updated</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
 <div class="message assistant" id="msg-2025-12-24T10-00-35-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-35-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:35.000Z" data-timestamp="2025-12-24T10:00:35.000Z">2025-12-24T10:00:35.000Z</time></a></span></div><div class="message-content">
@@ -231,7 +256,7 @@ tests/test_math.py ..  [100%]
 </div></div></div>
 <div class="message tool-reply" id="msg-2025-12-24T10-00-40-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-40-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:40.000Z" data-timestamp="2025-12-24T10:00:40.000Z">2025-12-24T10:00:40.000Z</time></a></span></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><div class="commit-card"><a href="https://github.com/example/project/commit/abc1234"><span class="commit-card-hash">abc1234</span> Add math_utils with add function</a></div><pre>1 file changed, 5 insertions(+)</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
 <div class="message assistant" id="msg-2025-12-24T10-00-45-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-00-45-000Z" class="timestamp-link"><time datetime="2025-12-24T10:00:45.000Z" data-timestamp="2025-12-24T10:00:45.000Z">2025-12-24T10:00:45.000Z</time></a></span></div><div class="message-content">
-<div class="assistant-text" data-markdown="Committed! Now pushing to remote."><p>Committed! Now pushing to remote.</p></div>
+<div class="assistant-text" data-markdown="Committed! Now pushing to remote." id="msg-2025-12-24T10-00-45-000Z-b0"><p>Committed! Now pushing to remote.</p></div>
 <div class="tool-use bash-tool" data-tool-id="toolu_bash_003">
 <div class="tool-header"><span class="tool-icon">$</span> Bash</div>
 <div class="tool-description">Push to remote</div><div class="truncatable"><div class="truncatable-content"><pre class="bash-command">git push -u origin main</pre></div><button class="expand-btn">Show more</button></div>
@@ -245,7 +270,7 @@ To github.com:example/project.git
 <div class="message user" id="msg-2025-12-24T10-01-00-000Z"><div class="message-header"><span class="role-label">User</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-01-00-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:00.000Z" data-timestamp="2025-12-24T10:01:00.000Z">2025-12-24T10:01:00.000Z</time></a></span></div><div class="message-content">
 <div class="user-content" data-markdown="Now edit the file to add a subtract function"><p>Now edit the file to add a subtract function</p></div></div></div>
 <div class="message assistant" id="msg-2025-12-24T10-01-05-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-01-05-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:05.000Z" data-timestamp="2025-12-24T10:01:05.000Z">2025-12-24T10:01:05.000Z</time></a></span></div><div class="message-content">
-<div class="tool-use" data-tool-id="toolu_glob_001"><div class="tool-header"><span class="tool-icon">⚙</span> Glob</div><div class="truncatable"><div class="truncatable-content"><pre class="json">{
+<div class="tool-use" data-tool-id="toolu_glob_001" id="msg-2025-12-24T10-01-05-000Z-b0"><div class="tool-header"><span class="tool-icon">⚙</span> Glob</div><div class="truncatable"><div class="truncatable-content"><pre class="json">{
   &#34;pattern&#34;: &#34;**/*.py&#34;,
   &#34;path&#34;: &#34;/project&#34;
 }</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
@@ -268,8 +293,8 @@ def subtract(a: int, b: int) -&gt; int:
 </div></div></div>
 <div class="message tool-reply" id="msg-2025-12-24T10-01-20-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-01-20-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:20.000Z" data-timestamp="2025-12-24T10:01:20.000Z">2025-12-24T10:01:20.000Z</time></a></span></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><pre>File edited successfully</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
 <div class="message assistant" id="msg-2025-12-24T10-01-25-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-01-25-000Z" class="timestamp-link"><time datetime="2025-12-24T10:01:25.000Z" data-timestamp="2025-12-24T10:01:25.000Z">2025-12-24T10:01:25.000Z</time></a></span></div><div class="message-content">
-<div class="assistant-text" data-markdown="Added the subtract function. Let me verify with grep."><p>Added the subtract function. Let me verify with grep.</p></div>
-<div class="tool-use" data-tool-id="toolu_grep_001"><div class="tool-header"><span class="tool-icon">⚙</span> Grep</div><div class="truncatable"><div class="truncatable-content"><pre class="json">{
+<div class="assistant-text" data-markdown="Added the subtract function. Let me verify with grep." id="msg-2025-12-24T10-01-25-000Z-b0"><p>Added the subtract function. Let me verify with grep.</p></div>
+<div class="tool-use" data-tool-id="toolu_grep_001" id="msg-2025-12-24T10-01-25-000Z-b1"><div class="tool-header"><span class="tool-icon">⚙</span> Grep</div><div class="truncatable"><div class="truncatable-content"><pre class="json">{
   &#34;pattern&#34;: &#34;def subtract&#34;,
   &#34;path&#34;: &#34;/project&#34;,
   &#34;output_mode&#34;: &#34;content&#34;
@@ -296,7 +321,7 @@ Here&#39;s some **markdown** content with:
 ```python
 def example():
     return 42
-```"><p>There's a test failure. I need to check the test file and fix it.</p>
+```" id="msg-2025-12-24T10-02-15-000Z-b0"><p>There's a test failure. I need to check the test file and fix it.</p>
 <p>Here's some <strong>markdown</strong> content with:</p>
 <ul>
 <li>A bullet list</li>
@@ -324,7 +349,7 @@ def example():
 </div></div></div>
 <div class="message tool-reply" id="msg-2025-12-24T10-03-20-000Z"><div class="message-header"><span class="role-label">Tool reply</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-03-20-000Z" class="timestamp-link"><time datetime="2025-12-24T10:03:20.000Z" data-timestamp="2025-12-24T10:03:20.000Z">2025-12-24T10:03:20.000Z</time></a></span></div><div class="message-content"><div class="tool-result"><div class="truncatable"><div class="truncatable-content"><div class="commit-card"><a href="https://github.com/example/project/commit/def5678"><span class="commit-card-hash">def5678</span> Add subtract function and fix tests</a></div><pre>2 files changed, 10 insertions(+), 1 deletion(-)</pre></div><button class="expand-btn">Show more</button></div></div></div></div>
 <div class="message assistant" id="msg-2025-12-24T10-03-25-000Z"><div class="message-header"><span class="role-label">Assistant</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-03-25-000Z" class="timestamp-link"><time datetime="2025-12-24T10:03:25.000Z" data-timestamp="2025-12-24T10:03:25.000Z">2025-12-24T10:03:25.000Z</time></a></span></div><div class="message-content">
-<div class="assistant-text" data-markdown="Done! The subtract function is now working and committed."><p>Done! The subtract function is now working and committed.</p></div></div></div><details class="continuation"><summary>Session continuation summary</summary>
+<div class="assistant-text" data-markdown="Done! The subtract function is now working and committed." id="msg-2025-12-24T10-03-25-000Z-b0"><p>Done! The subtract function is now working and committed.</p></div></div></div><details class="continuation"><summary>Session continuation summary</summary>
 <div class="message user" id="msg-2025-12-24T10-04-00-000Z"><div class="message-header"><span class="role-label">User</span><span class="message-header-actions"><button type="button" class="copy-btn copy-text" title="Copy formatted text" aria-label="Copy formatted text">&#x1F4CB;</button><button type="button" class="copy-btn copy-md" title="Copy markdown source" aria-label="Copy markdown source">&#x3C;/&#x3E;</button><a href="#msg-2025-12-24T10-04-00-000Z" class="timestamp-link"><time datetime="2025-12-24T10:04:00.000Z" data-timestamp="2025-12-24T10:04:00.000Z">2025-12-24T10:04:00.000Z</time></a></span></div><div class="message-content">
 <div class="user-content" data-markdown="This is a session continuation summary from a previous context. The user was working on a math utilities library."><p>This is a session continuation summary from a previous context. The user was working on a math utilities library.</p></div></div></div></details>
         
@@ -338,7 +363,7 @@ def example():
 </div>
 
         <div id="session-card" hidden></div>
-<script id="session-card-data" type="application/json">{"title": "Create a simple Python function to add two numbers", "stats": {"prompts": 5, "messages": 33, "tool_calls": 12, "commits": 2}, "usage": {"context_tokens": null, "output_tokens": 0}, "recap": {"text": "Added multiply function!", "source": "assistant"}, "prompts": [{"num": 1, "id": "msg-2025-12-24T10-00-00-000Z", "link": "page-001.html#msg-2025-12-24T10-00-00-000Z", "preview": "Create a simple Python function to add two numbers", "timestamp": "2025-12-24T10:00:00.000Z"}, {"num": 2, "id": "msg-2025-12-24T10-01-00-000Z", "link": "page-001.html#msg-2025-12-24T10-01-00-000Z", "preview": "Now edit the file to add a subtract function", "timestamp": "2025-12-24T10:01:00.000Z"}, {"num": 3, "id": "msg-2025-12-24T10-02-00-000Z", "link": "page-001.html#msg-2025-12-24T10-02-00-000Z", "preview": "Run the tests again", "timestamp": "2025-12-24T10:02:00.000Z"}, {"num": 4, "id": "msg-2025-12-24T10-03-00-000Z", "link": "page-001.html#msg-2025-12-24T10-03-00-000Z", "preview": "Fix the issue and commit", "timestamp": "2025-12-24T10:03:00.000Z"}, {"num": 5, "id": "msg-2025-12-24T10-05-00-000Z", "link": "page-002.html#msg-2025-12-24T10-05-00-000Z", "preview": "Add a multiply function too", "timestamp": "2025-12-24T10:05:00.000Z"}], "latest_link": "page-002.html#msg-2025-12-24T10-05-15-000Z"}</script>
+<script id="session-card-data" type="application/json">{"title": "Create a simple Python function to add two numbers", "stats": {"prompts": 5, "messages": 33, "tool_calls": 12, "commits": 2}, "usage": {"context_tokens": null, "output_tokens": 0}, "usage_detail": {"model": null, "last": null, "totals": {"input": 0, "cache_read": 0, "cache_creation": 0, "output": 0}, "context_by_prompt": [{"num": 1, "context_tokens": null}, {"num": 2, "context_tokens": null}, {"num": 3, "context_tokens": null}, {"num": 4, "context_tokens": null}, {"num": 5, "context_tokens": null}]}, "recap": {"text": "Added multiply function!", "source": "assistant"}, "prompts": [{"num": 1, "id": "msg-2025-12-24T10-00-00-000Z", "link": "page-001.html#msg-2025-12-24T10-00-00-000Z", "preview": "Create a simple Python function to add two numbers", "timestamp": "2025-12-24T10:00:00.000Z", "artifacts": [{"type": "completion", "label": "Committed! Now pushing to remote.", "id": "msg-2025-12-24T10-00-45-000Z-b0", "link": "page-001.html#msg-2025-12-24T10-00-45-000Z-b0"}]}, {"num": 2, "id": "msg-2025-12-24T10-01-00-000Z", "link": "page-001.html#msg-2025-12-24T10-01-00-000Z", "preview": "Now edit the file to add a subtract function", "timestamp": "2025-12-24T10:01:00.000Z", "artifacts": [{"type": "completion", "label": "Added the subtract function. Let me verify with grep.", "id": "msg-2025-12-24T10-01-25-000Z-b0", "link": "page-001.html#msg-2025-12-24T10-01-25-000Z-b0"}]}, {"num": 3, "id": "msg-2025-12-24T10-02-00-000Z", "link": "page-001.html#msg-2025-12-24T10-02-00-000Z", "preview": "Run the tests again", "timestamp": "2025-12-24T10:02:00.000Z", "artifacts": [{"type": "completion", "label": "There's a test failure. I need to check the test file and...", "id": "msg-2025-12-24T10-02-15-000Z-b0", "link": "page-001.html#msg-2025-12-24T10-02-15-000Z-b0"}]}, {"num": 4, "id": "msg-2025-12-24T10-03-00-000Z", "link": "page-001.html#msg-2025-12-24T10-03-00-000Z", "preview": "Fix the issue and commit", "timestamp": "2025-12-24T10:03:00.000Z", "artifacts": [{"type": "completion", "label": "Done! The subtract function is now working and committed.", "id": "msg-2025-12-24T10-03-25-000Z-b0", "link": "page-001.html#msg-2025-12-24T10-03-25-000Z-b0"}]}, {"num": 5, "id": "msg-2025-12-24T10-05-00-000Z", "link": "page-002.html#msg-2025-12-24T10-05-00-000Z", "preview": "Add a multiply function too", "timestamp": "2025-12-24T10:05:00.000Z", "artifacts": [{"type": "completion", "label": "Added multiply function!", "id": "msg-2025-12-24T10-05-15-000Z-b0", "link": "page-002.html#msg-2025-12-24T10-05-15-000Z-b0"}]}], "latest_link": "page-002.html#msg-2025-12-24T10-05-15-000Z"}</script>
     </div>
     <script>
 document.querySelectorAll('time[data-timestamp]').forEach(function(el) {
@@ -437,11 +462,18 @@ document.querySelectorAll('.message').forEach(function(msg) {
 
 (function () {
   var STORAGE_KEY = 'cct-card-expanded';
+  var USAGE_KEY = 'cct-usage-detail';
+  var ICONS = { insight: '★', thinking: '💭', plan: '📋', completion: '✓' };
   var root = null;
   var refs = {};
   var statsState = { prompts: 0, messages: 0, tool_calls: 0, commits: 0 };
   var lastCtx = null;
   var recapPinned = false; // a real recap beats assistant-text fallbacks
+  var promptItems = {}; // num -> {li, toggle, sublist}
+  var promptHrefs = {}; // num -> href (context bars + artifact fallbacks)
+  var artifactByAnchor = {}; // anchor id -> {li, icon} for retype-in-place
+  var ctxSeries = {}; // prompt num -> context tokens (bars)
+  var usageDetail = null; // {model, last, totals}
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -488,9 +520,24 @@ document.querySelectorAll('.message').forEach(function(msg) {
 
     refs.stats = el('div', 'card-stats', '');
     panel.appendChild(refs.stats);
-    refs.usage = el('div', 'card-usage', '');
+    refs.usage = el('div', 'card-usage');
     refs.usage.hidden = true;
+    refs.usageText = el('span', 'card-usage-text', '');
+    refs.usageToggle = el('button', 'card-usage-toggle', '▸ details');
+    refs.usageToggle.type = 'button';
+    refs.usageToggle.hidden = true; // shown when a breakdown exists
+    refs.usage.appendChild(refs.usageText);
+    refs.usage.appendChild(refs.usageToggle);
     panel.appendChild(refs.usage);
+    refs.usageDetail = el('div', 'card-usage-detail');
+    refs.usageDetail.hidden = true;
+    panel.appendChild(refs.usageDetail);
+    refs.usageToggle.addEventListener('click', function () {
+      var open = refs.usageDetail.hidden;
+      refs.usageDetail.hidden = !open;
+      refs.usageToggle.textContent = (open ? '▾' : '▸') + ' details';
+      try { localStorage.setItem(USAGE_KEY, open ? '1' : '0'); } catch (e) {}
+    });
 
     refs.recapWrap = el('div', 'card-recap');
     refs.recapWrap.hidden = true;
@@ -558,9 +605,87 @@ document.querySelectorAll('.message').forEach(function(msg) {
     var parts = [];
     if (ctx) parts.push('Context ' + ctx);
     if (out) parts.push('Output ' + out);
-    refs.usage.textContent = parts.join(' · ');
+    refs.usageText.textContent = parts.join(' · ');
     refs.usage.hidden = false;
     updatePill();
+  }
+  function fmtNum(n) {
+    return n == null ? '—' : Number(n).toLocaleString();
+  }
+  function setUsageDetail(d) {
+    usageDetail = d && d.last ? d : null;
+    renderUsageDetail();
+  }
+  function renderUsageDetail() {
+    if (!refs.usageDetail) return;
+    if (!usageDetail) {
+      refs.usageToggle.hidden = true;
+      refs.usageDetail.hidden = true;
+      return;
+    }
+    refs.usageToggle.hidden = false;
+    refs.usageDetail.innerHTML = '';
+    if (usageDetail.model) {
+      refs.usageDetail.appendChild(
+        el('div', 'card-usage-model', usageDetail.model)
+      );
+    }
+    var table = el('table', 'card-usage-table');
+    var head = el('tr');
+    head.appendChild(el('th', null, ''));
+    head.appendChild(el('th', null, 'latest'));
+    head.appendChild(el('th', null, 'total'));
+    table.appendChild(head);
+    [
+      ['input', 'input'],
+      ['cache read', 'cache_read'],
+      ['cache create', 'cache_creation'],
+      ['output', 'output']
+    ].forEach(function (row) {
+      var tr = el('tr');
+      tr.appendChild(el('td', null, row[0]));
+      tr.appendChild(el('td', 'num', fmtNum(usageDetail.last ? usageDetail.last[row[1]] : null)));
+      tr.appendChild(el('td', 'num', fmtNum(usageDetail.totals ? usageDetail.totals[row[1]] : null)));
+      table.appendChild(tr);
+    });
+    refs.usageDetail.appendChild(table);
+    refs.usageDetail.appendChild(el('div', 'card-section-label', 'Context by prompt'));
+    refs.bars = el('div', 'ctx-bars');
+    refs.usageDetail.appendChild(refs.bars);
+    renderBars();
+    var open = false;
+    try { open = localStorage.getItem(USAGE_KEY) === '1'; } catch (e) {}
+    refs.usageDetail.hidden = !open;
+    refs.usageToggle.textContent = (open ? '▾' : '▸') + ' details';
+  }
+  function renderBars() {
+    if (!refs.bars) return;
+    refs.bars.innerHTML = '';
+    var nums = Object.keys(ctxSeries).map(Number);
+    if (!nums.length) return;
+    var max = 0;
+    nums.forEach(function (n) { if (ctxSeries[n] > max) max = ctxSeries[n]; });
+    var total = Math.max(statsState.prompts || 0, Math.max.apply(null, nums));
+    for (var n = 1; n <= total; n++) {
+      var bar = el('div', 'ctx-bar');
+      var v = ctxSeries[n];
+      var fill = el('div', 'ctx-bar-fill');
+      fill.style.height = v && max ? Math.max(8, Math.round((v / max) * 100)) + '%' : '0%';
+      bar.title = '#' + n + (v ? ' · ' + formatTokens(v) : '');
+      bar.appendChild(fill);
+      (function (num) {
+        bar.addEventListener('click', function () {
+          var href = promptHrefs[num];
+          if (href) location.href = href;
+        });
+      })(n);
+      refs.bars.appendChild(bar);
+    }
+  }
+  function recordContext(num, ctx) {
+    if (!num || ctx == null) return;
+    ctxSeries[num] = ctx;
+    renderBars();
   }
   function setRecap(text, isReal) {
     if (!refs.recapWrap || !text) return;
@@ -573,15 +698,64 @@ document.querySelectorAll('.message').forEach(function(msg) {
   function addPrompt(p) {
     if (!refs.promptList || !p) return;
     var li = el('li');
+    var toggle = el('button', 'card-prompt-toggle', '▸');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-label', 'Show artifacts');
+    toggle.hidden = true; // revealed when the first artifact arrives
     var a = el('a', null, '#' + p.num + '  ' + p.preview);
     a.href = p.link || ('#' + p.id);
+    li.appendChild(toggle);
     li.appendChild(a);
     refs.promptList.appendChild(li);
+    promptHrefs[p.num] = a.href;
+    var item = { li: li, toggle: toggle, sublist: null };
+    promptItems[p.num] = item;
+    toggle.addEventListener('click', function () {
+      if (!item.sublist) return;
+      var open = item.sublist.hidden;
+      item.sublist.hidden = !open;
+      toggle.textContent = open ? '▾' : '▸';
+    });
+    (p.artifacts || []).forEach(function (art) { addArtifact(p.num, art); });
+  }
+  function addArtifact(num, a) {
+    if (!a || !a.id) return;
+    var existing = artifactByAnchor[a.id];
+    if (existing) {
+      // Retype in place: a completion that re-targets an insight block swaps
+      // type/icon but keeps the richer insight label.
+      existing.li.className = 'card-artifact card-artifact-' + a.type;
+      existing.icon.textContent = ICONS[a.type] || '•';
+      return;
+    }
+    var item = promptItems[num];
+    if (!item) return;
+    if (!item.sublist) {
+      item.sublist = el('ol', 'card-artifacts');
+      item.sublist.hidden = true; // collapsed by default
+      item.li.appendChild(item.sublist);
+      item.toggle.hidden = false;
+    }
+    var li = el('li', 'card-artifact card-artifact-' + a.type);
+    var icon = el('span', 'card-artifact-icon', ICONS[a.type] || '•');
+    var link = el('a', null, a.label || a.type);
+    link.href = a.link || ('#' + a.id);
+    li.appendChild(icon);
+    li.appendChild(link);
+    item.sublist.appendChild(li);
+    artifactByAnchor[a.id] = { li: li, icon: icon };
+  }
+  function addChapter(title) {
+    if (!refs.promptList || !title) return;
+    refs.promptList.appendChild(el('li', 'card-chapter', '── ' + title + ' ──'));
   }
   function setPrompts(list) {
     if (!refs.promptList) return;
     refs.promptList.innerHTML = '';
-    (list || []).forEach(addPrompt);
+    (list || []).forEach(function (item) {
+      if (item && item.kind === 'chapter') addChapter(item.title);
+      else addPrompt(item);
+    });
   }
   function setLatestLink(href) {
     if (!refs.latestBtn || !href) return;
@@ -591,10 +765,16 @@ document.querySelectorAll('.message').forEach(function(msg) {
   function reset() {
     recapPinned = false;
     lastCtx = null;
+    promptItems = {};
+    promptHrefs = {};
+    artifactByAnchor = {};
+    ctxSeries = {};
+    usageDetail = null;
     setStats({ prompts: 0, messages: 0, tool_calls: 0, commits: 0 });
     if (refs.usage) refs.usage.hidden = true;
     if (refs.recapWrap) refs.recapWrap.hidden = true;
     if (refs.promptList) refs.promptList.innerHTML = '';
+    renderUsageDetail();
   }
   function init(data) {
     if (!build()) return;
@@ -603,6 +783,12 @@ document.querySelectorAll('.message').forEach(function(msg) {
     setTitle(data.title);
     setStats(data.stats);
     setUsage(data.usage);
+    if (data.usage_detail) {
+      (data.usage_detail.context_by_prompt || []).forEach(function (e) {
+        if (e && e.context_tokens != null) ctxSeries[e.num] = e.context_tokens;
+      });
+      setUsageDetail(data.usage_detail);
+    }
     if (data.recap && data.recap.text) {
       setRecap(data.recap.text, data.recap.source === 'recap');
     }
@@ -612,8 +798,10 @@ document.querySelectorAll('.message').forEach(function(msg) {
 
   window.sessionCard = {
     init: init, reset: reset, setTitle: setTitle, setStats: setStats,
-    setUsage: setUsage, setRecap: setRecap, addPrompt: addPrompt,
-    setPrompts: setPrompts, setLatestLink: setLatestLink
+    setUsage: setUsage, setUsageDetail: setUsageDetail,
+    recordContext: recordContext, setRecap: setRecap, addPrompt: addPrompt,
+    addArtifact: addArtifact, addChapter: addChapter, setPrompts: setPrompts,
+    setLatestLink: setLatestLink
   };
 
   // Static pages: auto-init from the embedded JSON payload.

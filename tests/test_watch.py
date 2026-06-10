@@ -22,6 +22,7 @@ from claude_code_transcripts import (
     resolve_active_session,
     create_live_server,
     compute_usage_totals,
+    compute_usage_detail,
     last_assistant_snippet,
     prompt_preview,
     cli,
@@ -54,6 +55,23 @@ def _assistant_line(text, usage=None, ts="T"):
     if usage:
         msg["usage"] = usage
     obj = {"type": "assistant", "timestamp": ts, "message": msg}
+    return (json.dumps(obj) + "\n").encode("utf-8")
+
+
+INSIGHT_BLOCK_TEXT = (
+    "`★ Insight ─────────────────────────────────────`\n"
+    "- Anchors are assigned by content position\n"
+    "`─────────────────────────────────────────────────`"
+)
+
+
+def _assistant_blocks_line(blocks, ts="T"):
+    """One JSONL assistant line with explicit content blocks."""
+    obj = {
+        "type": "assistant",
+        "timestamp": ts,
+        "message": {"role": "assistant", "content": blocks},
+    }
     return (json.dumps(obj) + "\n").encode("utf-8")
 
 
@@ -403,6 +421,23 @@ class TestFormatSseEvent:
 class TestRenderLogline:
     """Single-entry HTML fragment for the live stream."""
 
+    def test_assistant_blocks_carry_anchor_ids(self):
+        """Live fragments get the same block anchors as static pages."""
+        entry = {
+            "type": "assistant",
+            "timestamp": "2025-01-01T10:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "hmm"},
+                    {"type": "text", "text": "reply"},
+                ],
+            },
+        }
+        fragment = render_logline(entry)
+        assert 'id="msg-2025-01-01T10-00-00-000Z-b0"' in fragment
+        assert 'id="msg-2025-01-01T10-00-00-000Z-b1"' in fragment
+
     def test_user_entry(self):
         entry = {
             "type": "user",
@@ -528,6 +563,7 @@ class TestLiveStats:
                 "timestamp": "T2",
                 "message": {
                     "role": "assistant",
+                    "model": "claude-fable-5",
                     "content": [
                         {
                             "type": "tool_use",
@@ -577,6 +613,74 @@ class TestLiveStats:
             "commits": 1,
             "context_tokens": 60,
             "output_tokens": 40,
+            "model": "claude-fable-5",
+            "last": {
+                "input": 10,
+                "cache_read": 30,
+                "cache_creation": 20,
+                "output": 40,
+            },
+            "totals": {
+                "input": 10,
+                "cache_read": 30,
+                "cache_creation": 20,
+                "output": 40,
+            },
+        }
+
+    def test_model_and_last_replace_while_totals_sum(self):
+        def assistant(model, usage, ts):
+            return {
+                "type": "assistant",
+                "timestamp": ts,
+                "message": {
+                    "role": "assistant",
+                    "model": model,
+                    "content": [{"type": "text", "text": "reply"}],
+                    "usage": usage,
+                },
+            }
+
+        state = new_live_stats()
+        accumulate_live_stats(
+            state,
+            assistant(
+                "claude-old-1",
+                {
+                    "input_tokens": 1,
+                    "cache_creation_input_tokens": 2,
+                    "cache_read_input_tokens": 3,
+                    "output_tokens": 10,
+                },
+                "T1",
+            ),
+        )
+        accumulate_live_stats(
+            state,
+            assistant(
+                "claude-fable-5",
+                {
+                    "input_tokens": 100,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 200,
+                    "output_tokens": 5,
+                },
+                "T2",
+            ),
+        )
+        payload = live_stats_payload(state)
+        assert payload["model"] == "claude-fable-5"  # latest wins
+        assert payload["last"] == {
+            "input": 100,
+            "cache_read": 200,
+            "cache_creation": 0,
+            "output": 5,
+        }
+        assert payload["totals"] == {
+            "input": 101,
+            "cache_read": 203,
+            "cache_creation": 2,
+            "output": 15,
         }
 
     def test_token_fields_track_latest_context_and_sum_output(self):
@@ -745,6 +849,66 @@ class TestCardDataHelpers:
 
     def test_prompt_preview_short_text_unchanged(self):
         assert prompt_preview("fix the bug") == "fix the bug"
+
+    def test_usage_detail_model_latest_wins_and_breakdown(self):
+        loglines = [
+            self._user(),
+            {
+                "type": "assistant",
+                "timestamp": "T1",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-old-1",
+                    "content": [{"type": "text", "text": "one"}],
+                    "usage": {
+                        "input_tokens": 10,
+                        "cache_creation_input_tokens": 5,
+                        "cache_read_input_tokens": 100,
+                        "output_tokens": 7,
+                    },
+                },
+            },
+            {
+                "type": "assistant",
+                "timestamp": "T2",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-fable-5",
+                    "content": [{"type": "text", "text": "two"}],
+                    "usage": {
+                        "input_tokens": 1,
+                        "cache_creation_input_tokens": 2,
+                        "cache_read_input_tokens": 300,
+                        "output_tokens": 4,
+                    },
+                },
+            },
+        ]
+        detail = compute_usage_detail(loglines)
+        assert detail["model"] == "claude-fable-5"
+        assert detail["last"] == {
+            "input": 1,
+            "cache_read": 300,
+            "cache_creation": 2,
+            "output": 4,
+        }
+        assert detail["totals"] == {
+            "input": 11,
+            "cache_read": 400,
+            "cache_creation": 7,
+            "output": 11,
+        }
+
+    def test_usage_detail_no_usage_gives_null_last_zero_totals(self):
+        detail = compute_usage_detail([self._user(), self._assistant()])
+        assert detail["last"] is None
+        assert detail["model"] is None
+        assert detail["totals"] == {
+            "input": 0,
+            "cache_read": 0,
+            "cache_creation": 0,
+            "output": 0,
+        }
 
 
 class TestResolveActiveSession:
@@ -968,6 +1132,13 @@ class TestLiveServer:
             assert 'id="session-card"' in body
             assert "sessionCard" in body  # CARD_JS wired in
             assert 'id="toc-list"' in body  # existing TOC untouched
+            # Chapter dividers: client inserts one per title CHANGE (not the
+            # first title), and a truncation reset re-arms the counter.
+            assert "addChapter" in body
+            assert "titleCount" in body
+            # Usage detail + context bars update live from stats events.
+            assert "setUsageDetail" in body
+            assert "recordContext" in body
         finally:
             server.shutdown()
             server.server_close()
@@ -1077,6 +1248,233 @@ class TestLiveServer:
                 payload = _data_for(more, "stats")[-1]
                 assert payload["context_tokens"] == 101  # latest, not summed
                 assert payload["output_tokens"] == 10  # summed
+                # /usage-style detail rides the same event.
+                assert payload["last"] == {
+                    "input": 1,
+                    "cache_read": 100,
+                    "cache_creation": 0,
+                    "output": 3,
+                }
+                assert payload["totals"]["output"] == 10
+                assert payload["totals"]["cache_creation"] == 5
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_artifact_events_stream_immediately(self, tmp_path):
+        """Insight/thinking/plan artifacts stream as their entry renders; the
+        completion is withheld until the turn provably ended (next prompt)."""
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(
+            _user_line("first prompt", "2025-01-01T10:00:00.000Z")
+            + _assistant_blocks_line(
+                [
+                    {"type": "thinking", "thinking": "deep thought " * 30},
+                    {"type": "text", "text": INSIGHT_BLOCK_TEXT},
+                    {"type": "text", "text": "still working"},
+                ],
+                ts="2025-01-01T10:00:30.000Z",
+            )
+        )
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                initial = _collect_sse(
+                    lines, lambda evs: any(ev == "stats" for ev, _ in evs)
+                )
+                arts = _data_for(initial, "artifact")
+                assert [a["type"] for a in arts] == ["thinking", "insight"]
+                assert all(a["prompt"] == 1 for a in arts)
+                assert arts[0]["id"] == "msg-2025-01-01T10-00-30-000Z-b0"
+                assert arts[1]["label"] == "Anchors are assigned by content position"
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_completion_emitted_retroactively_on_next_prompt(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(
+            _user_line("first prompt", "2025-01-01T10:00:00.000Z")
+            + _assistant_blocks_line(
+                [{"type": "text", "text": "the final reply"}],
+                ts="2025-01-01T10:00:30.000Z",
+            )
+        )
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                initial = _collect_sse(
+                    lines, lambda evs: any(ev == "stats" for ev, _ in evs)
+                )
+                assert _data_for(initial, "artifact") == []  # turn still open
+
+                with open(p, "ab") as f:
+                    f.write(_user_line("second prompt", "2025-01-01T10:05:00.000Z"))
+                    f.flush()
+                    os.fsync(f.fileno())
+                more = _collect_sse(
+                    lines,
+                    lambda evs: any(
+                        ev == "prompt" and json.loads(d)["num"] == 2 for ev, d in evs
+                    ),
+                )
+                arts = _data_for(more, "artifact")
+                assert arts == [
+                    {
+                        "prompt": 1,
+                        "type": "completion",
+                        "label": "the final reply",
+                        "id": "msg-2025-01-01T10-00-30-000Z-b0",
+                    }
+                ]
+                # The completion lands before the new prompt event.
+                kinds = [ev for ev, _ in more if ev in ("artifact", "prompt")]
+                assert kinds.index("artifact") < kinds.index("prompt")
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_completion_retype_same_anchor_when_insight_is_last(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(
+            _user_line("first prompt", "2025-01-01T10:00:00.000Z")
+            + _assistant_blocks_line(
+                [{"type": "text", "text": INSIGHT_BLOCK_TEXT}],
+                ts="2025-01-01T10:00:30.000Z",
+            )
+        )
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                initial = _collect_sse(
+                    lines, lambda evs: any(ev == "stats" for ev, _ in evs)
+                )
+                first = _data_for(initial, "artifact")
+                assert [a["type"] for a in first] == ["insight"]
+                anchor = first[0]["id"]
+
+                with open(p, "ab") as f:
+                    f.write(_user_line("second prompt", "2025-01-01T10:05:00.000Z"))
+                    f.flush()
+                    os.fsync(f.fileno())
+                more = _collect_sse(
+                    lines, lambda evs: any(ev == "artifact" for ev, _ in evs)
+                )
+                completion = _data_for(more, "artifact")[0]
+                assert completion["type"] == "completion"
+                assert completion["id"] == anchor  # same block: client retypes
+                assert completion["label"] == "Anchors are assigned by content position"
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_truncation_clears_pending_completion(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(
+            _user_line("first prompt one", "2025-01-01T10:00:00.000Z")
+            + _assistant_blocks_line(
+                [{"type": "text", "text": "pre-reset reply"}],
+                ts="2025-01-01T10:00:30.000Z",
+            )
+            + _user_line("padding prompt two", "2025-01-01T10:01:00.000Z")
+        )
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                _collect_sse(
+                    lines,
+                    lambda evs: any(
+                        ev == "stats" and json.loads(d)["prompts"] == 2 for ev, d in evs
+                    ),
+                )
+
+                # Truncate to a SMALLER fresh file -> reset; the old open
+                # turn's reply must not leak a completion afterwards.
+                p.write_bytes(_user_line("brand new", "2025-01-01T11:00:00.000Z"))
+                after = _collect_sse(
+                    lines,
+                    lambda evs: any(
+                        ev == "stats" and json.loads(d)["prompts"] == 1 for ev, d in evs
+                    ),
+                )
+                assert any(ev == "reset" for ev, _ in after)
+                assert all(
+                    a["label"] != "pre-reset reply"
+                    for a in _data_for(after, "artifact")
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_artifacts_before_first_prompt_skipped(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(
+            _assistant_blocks_line(
+                [{"type": "text", "text": INSIGHT_BLOCK_TEXT}],
+                ts="2025-01-01T09:59:30.000Z",
+            )
+            + _user_line("first prompt", "2025-01-01T10:00:00.000Z")
+        )
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                initial = _collect_sse(
+                    lines,
+                    lambda evs: any(
+                        ev == "stats" and json.loads(d)["prompts"] == 1 for ev, d in evs
+                    ),
+                )
+                assert _data_for(initial, "artifact") == []
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_shell_js_handles_artifact_events(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(_user_line("hello", "2025-01-01T10:00:00.000Z"))
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            body = httpx.get(f"http://127.0.0.1:{port}/", timeout=5).text
+            assert "addEventListener('artifact'" in body
         finally:
             server.shutdown()
             server.server_close()

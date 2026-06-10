@@ -191,6 +191,11 @@ class SessionMetadata:
         shows; independent of `summary` so picker rows keep the prompt text.
     recap: the latest away-summary recap (Claude Code's "※ recap:" text), or
         None. Untruncated — it feeds the session info card, not picker rows.
+    title_changes: ((anchor_ts, title), ...) — one entry per DISTINCT ai-title
+        change after the first title. ai-title lines carry no timestamp, so
+        each change is anchored to the latest user-line timestamp seen when it
+        was read; a chapter divider belongs before the first prompt after that
+        anchor.
     """
 
     summary: str
@@ -199,6 +204,7 @@ class SessionMetadata:
     from_control_fallback: bool
     ai_title: str | None = None
     recap: str | None = None
+    title_changes: tuple = ()
 
     @property
     def title(self):
@@ -231,6 +237,8 @@ def scan_session_metadata(filepath, max_length=200):
     branch = None
     ai_title = None
     recap = None
+    last_user_ts = ""  # anchor for title changes (ai-title lines lack one)
+    title_changes = []
 
     try:
         with open(filepath, "r", encoding="utf-8") as f:
@@ -246,10 +254,19 @@ def scan_session_metadata(filepath, max_length=200):
                 if branch is None and obj.get("gitBranch"):
                     branch = obj["gitBranch"]
 
+                if obj.get("type") == "user" and obj.get("timestamp"):
+                    last_user_ts = obj["timestamp"]
+
                 # Last one wins: Claude Code rewrites the auto-title as the
-                # session evolves, so keep overwriting until EOF.
+                # session evolves, so keep overwriting until EOF. A DIFFERENT
+                # title after the first is a chapter-worthy change.
                 if obj.get("type") == "ai-title" and obj.get("aiTitle"):
-                    ai_title = obj["aiTitle"]
+                    new_title = obj["aiTitle"]
+                    if ai_title is not None and new_title != ai_title:
+                        title_changes.append(
+                            (last_user_ts, _truncate(new_title, max_length))
+                        )
+                    ai_title = new_title
                     continue
 
                 # Latest away_summary = the session's current recap.
@@ -315,6 +332,7 @@ def scan_session_metadata(filepath, max_length=200):
         from_control_fallback=from_control_fallback,
         ai_title=_truncate(ai_title, max_length) if ai_title else None,
         recap=recap or None,
+        title_changes=tuple(title_changes),
     )
 
 
@@ -568,6 +586,7 @@ def find_all_sessions(folder, include_agents=False):
                 "summary": meta.summary,
                 "title": meta.title,
                 "recap": meta.recap,
+                "title_changes": meta.title_changes,
                 "branch": meta.branch,
                 "command": meta.command,
                 "mtime": stat.st_mtime,
@@ -741,13 +760,14 @@ def generate_batch_html(
 
             # Generate transcript HTML with error handling
             try:
-                # Title/recap from the scan find_all_sessions already did —
-                # avoids a second metadata pass per archived session.
+                # Title/recap/chapters from the scan find_all_sessions already
+                # did — avoids a second metadata pass per archived session.
                 generate_html(
                     session["path"],
                     session_dir,
                     title=session.get("title"),
                     recap=session.get("recap"),
+                    title_changes=session.get("title_changes"),
                 )
                 successful_sessions += 1
                 # Record the mtime we actually rendered against, not a re-stat
@@ -1332,7 +1352,7 @@ def render_bash_tool(tool_input, tool_id):
     return _macros.bash_tool(command, description, tool_id)
 
 
-def render_content_block(block):
+def render_content_block(block, block_id=None):
     if not isinstance(block, dict):
         return f"<p>{html.escape(str(block))}</p>"
     block_type = block.get("type", "")
@@ -1344,11 +1364,11 @@ def render_content_block(block):
     elif block_type == "thinking":
         thinking_text = block.get("thinking", "")
         content_html = render_markdown_text(thinking_text)
-        return _macros.thinking(content_html, thinking_text)
+        return _macros.thinking(content_html, thinking_text, block_id or "")
     elif block_type == "text":
         text = block.get("text", "")
         content_html = render_markdown_text(text)
-        return _macros.assistant_text(content_html, text)
+        return _macros.assistant_text(content_html, text, block_id or "")
     elif block_type == "tool_use":
         tool_name = block.get("name", "Unknown tool")
         tool_input = block.get("input", {})
@@ -1364,7 +1384,9 @@ def render_content_block(block):
         description = tool_input.get("description", "")
         display_input = {k: v for k, v in tool_input.items() if k != "description"}
         input_json = json.dumps(display_input, indent=2, ensure_ascii=False)
-        return _macros.tool_use(tool_name, description, input_json, tool_id)
+        return _macros.tool_use(
+            tool_name, description, input_json, tool_id, block_id or ""
+        )
     elif block_type == "tool_result":
         content = block.get("content", "")
         is_error = block.get("is_error", False)
@@ -1442,22 +1464,205 @@ def render_user_message_content(message_data):
     return f"<p>{html.escape(str(content))}</p>"
 
 
-def render_assistant_message(message_data):
+def render_assistant_message(message_data, msg_id=None):
     content = message_data.get("content", [])
     if not isinstance(content, list):
         return f"<p>{html.escape(str(content))}</p>"
-    return "".join(render_content_block(block) for block in content)
+    if msg_id is None:
+        return "".join(render_content_block(block) for block in content)
+    return "".join(
+        render_content_block(block, block_id=bid)
+        for bid, block in iter_assistant_blocks(message_data, msg_id)
+    )
 
 
 def make_msg_id(timestamp):
     return f"msg-{timestamp.replace(':', '-').replace('.', '-')}"
 
 
+def block_anchor(msg_id, index):
+    """Stable element id for content block `index` of message `msg_id`."""
+    return f"{msg_id}-b{index}"
+
+
+def iter_assistant_blocks(message_data, msg_id):
+    """Yield (block_id, block) for every content block of an assistant message.
+
+    The single enumeration shared by rendering and artifact extraction, so
+    deep-link anchors can never drift from the rendered ids. The index is the
+    content-array position — every block counts, whether or not its renderer
+    emits an id.
+    """
+    content = message_data.get("content", [])
+    if not isinstance(content, list):
+        return
+    for i, block in enumerate(content):
+        yield block_anchor(msg_id, i), block
+
+
+# Artifact extraction: the deep-linkable moments of a session (insights,
+# substantial thinking, plans, per-prompt completion replies) that feed the
+# session card's prompt tree and the index timeline.
+INSIGHT_MARKER = "★ Insight"
+ARTIFACT_LABEL_LENGTH = 60
+ARTIFACT_ICONS = {"insight": "★", "thinking": "💭", "plan": "📋", "completion": "✓"}
+
+_MD_HEADING_RE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
+
+
+def artifact_label(text, max_length=ARTIFACT_LABEL_LENGTH):
+    """Whitespace-collapsed, capped label for an artifact link."""
+    return _truncate(" ".join(text.split()), max_length)
+
+
+def is_insight_text(text):
+    """True when a text block is an Insight callout (★ Insight marker)."""
+    return INSIGHT_MARKER in text
+
+
+def insight_label(text):
+    """First meaningful line after the ★ Insight marker, as the link label.
+
+    Separator lines (box-drawing dashes/backticks) and bullet prefixes are
+    skipped/stripped; falls back to the generic label when nothing usable
+    follows the marker.
+    """
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if INSIGHT_MARKER not in line:
+            continue
+        for follow in lines[i + 1 :]:
+            cleaned = follow.strip().strip("`").strip()
+            cleaned = cleaned.lstrip("-*• ").strip()
+            if cleaned and set(cleaned) - {"─", "-", "`"}:
+                return artifact_label(cleaned)
+        break
+    return artifact_label(text)
+
+
+def plan_label(tool_input):
+    """Label for an ExitPlanMode artifact.
+
+    Legacy sessions carried the plan markdown in input.plan — use its first
+    heading. Modern input is {"allowedPrompts": [...]} with the plan text in
+    the tool result, so a generic label is all the input offers.
+    """
+    plan_md = tool_input.get("plan") if isinstance(tool_input, dict) else None
+    if plan_md:
+        match = _MD_HEADING_RE.search(plan_md)
+        if match:
+            return artifact_label("Plan: " + match.group(1))
+    return "Plan presented"
+
+
+def iter_block_artifacts(message_data, msg_id):
+    """Yield (kind, anchor, label) for an assistant message's notable blocks.
+
+    kind: "thinking" (only blocks >= LONG_TEXT_THRESHOLD chars), "insight",
+    "plan" (ExitPlanMode), or "text" — a plain text block, which is not an
+    artifact itself but the running completion candidate. Anchors come from
+    iter_assistant_blocks, the same enumeration rendering uses.
+    """
+    for anchor, block in iter_assistant_blocks(message_data, msg_id):
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "thinking":
+            text = block.get("thinking", "")
+            if len(text) >= LONG_TEXT_THRESHOLD:
+                yield "thinking", anchor, artifact_label(text)
+        elif btype == "text":
+            text = block.get("text", "")
+            if not text:
+                continue
+            if is_insight_text(text):
+                yield "insight", anchor, insight_label(text)
+            else:
+                yield "text", anchor, artifact_label(text)
+        elif btype == "tool_use" and block.get("name") == "ExitPlanMode":
+            yield "plan", anchor, plan_label(block.get("input", {}))
+
+
+def extract_conversation_artifacts(message_groups):
+    """Collect deep-linkable artifacts for one prompt's conversation.
+
+    message_groups: [(page_num, messages)] — the prompt's conversation first,
+    then each continuation conversation with ITS page (continuations can
+    cross page boundaries); messages are (log_type, message_json, timestamp)
+    tuples as built by _build_conversations.
+
+    Returns [{"type","label","anchor","page"}] in block order. The last
+    text-or-insight block becomes the prompt's completion: a plain text block
+    is appended as type "completion"; an insight is retyped in place (its
+    richer label kept) so it isn't listed twice.
+    """
+    artifacts = []
+    # (artifact_index | None, anchor, label, page) of the last text/insight
+    last_text = None
+    for page, messages in message_groups:
+        for log_type, message_json, timestamp in messages:
+            if log_type != "assistant" or not message_json:
+                continue
+            try:
+                message_data = json.loads(message_json)
+            except json.JSONDecodeError:
+                continue
+            msg_id = make_msg_id(timestamp)
+            for kind, anchor, label in iter_block_artifacts(message_data, msg_id):
+                if kind == "text":
+                    last_text = (None, anchor, label, page)
+                    continue
+                artifacts.append(
+                    {"type": kind, "label": label, "anchor": anchor, "page": page}
+                )
+                if kind == "insight":
+                    last_text = (len(artifacts) - 1, anchor, label, page)
+    if last_text is not None:
+        idx, anchor, label, page = last_text
+        if idx is None:
+            artifacts.append(
+                {"type": "completion", "label": label, "anchor": anchor, "page": page}
+            )
+        else:
+            artifacts[idx]["type"] = "completion"
+    return artifacts
+
+
+def extract_entry_artifacts(entry):
+    """Live per-logline artifact split: (immediate, last_text).
+
+    immediate = [{"type","label","id"}] to emit as the entry renders
+    (insight/thinking/plan); last_text = {"id","label"} for the entry's final
+    text-or-insight block — the running completion candidate the server holds
+    until the next prompt arrives (insight keeps its richer label) — or None.
+    """
+    if entry.get("type") != "assistant":
+        return [], None
+    message_data = entry.get("message", {})
+    msg_id = make_msg_id(entry.get("timestamp", ""))
+    immediate = []
+    last_text = None
+    for kind, anchor, label in iter_block_artifacts(message_data, msg_id):
+        if kind == "text":
+            last_text = {"id": anchor, "label": label}
+            continue
+        immediate.append({"type": kind, "label": label, "id": anchor})
+        if kind == "insight":
+            last_text = {"id": anchor, "label": label}
+    return immediate, last_text
+
+
 def analyze_conversation(messages):
-    """Analyze messages in a conversation to extract stats and long texts."""
+    """Analyze messages in a conversation to extract stats and long texts.
+
+    Also reports ``context_tokens`` — the conversation's final context size
+    (input + cache fields of its LAST assistant usage), or None — feeding the
+    card's per-prompt context bars at no extra pass.
+    """
     tool_counts = {}  # tool_name -> count
     long_texts = []
     commits = []  # list of (hash, message, timestamp)
+    context_tokens = None
 
     for log_type, message_json, timestamp in messages:
         if not message_json:
@@ -1466,6 +1671,15 @@ def analyze_conversation(messages):
             message_data = json.loads(message_json)
         except json.JSONDecodeError:
             continue
+
+        if log_type == "assistant":
+            usage = message_data.get("usage")
+            if isinstance(usage, dict):
+                context_tokens = (
+                    (usage.get("input_tokens", 0) or 0)
+                    + (usage.get("cache_creation_input_tokens", 0) or 0)
+                    + (usage.get("cache_read_input_tokens", 0) or 0)
+                )
 
         content = message_data.get("content", [])
         if not isinstance(content, list):
@@ -1494,6 +1708,7 @@ def analyze_conversation(messages):
         "tool_counts": tool_counts,
         "long_texts": long_texts,
         "commits": commits,
+        "context_tokens": context_tokens,
     }
 
 
@@ -1544,6 +1759,7 @@ def render_message(log_type, message_json, timestamp):
         message_data = json.loads(message_json)
     except json.JSONDecodeError:
         return ""
+    msg_id = make_msg_id(timestamp)
     if log_type == "user":
         content_html = render_user_message_content(message_data)
         # Check if this is a tool result message
@@ -1552,13 +1768,12 @@ def render_message(log_type, message_json, timestamp):
         else:
             role_class, role_label = "user", "User"
     elif log_type == "assistant":
-        content_html = render_assistant_message(message_data)
+        content_html = render_assistant_message(message_data, msg_id)
         role_class, role_label = "assistant", "Assistant"
     else:
         return ""
     if not content_html.strip():
         return ""
-    msg_id = make_msg_id(timestamp)
     return _macros.message(role_class, role_label, msg_id, timestamp, content_html)
 
 
@@ -1616,6 +1831,39 @@ def compute_usage_totals(loglines):
     return {"context_tokens": context, "output_tokens": output}
 
 
+def compute_usage_detail(loglines):
+    """`/usage`-style breakdown for the card's expandable detail view.
+
+    model: ``message.model`` of the latest assistant entry carrying one.
+    last: the latest assistant usage as {input, cache_read, cache_creation,
+        output}, or None when the source recorded no usage (web exports —
+        the card hides the detail toggle).
+    totals: the same four fields summed across all assistant entries.
+    """
+    model = None
+    last = None
+    totals = {"input": 0, "cache_read": 0, "cache_creation": 0, "output": 0}
+    for entry in loglines:
+        if entry.get("type") != "assistant":
+            continue
+        message = entry.get("message", {})
+        if message.get("model"):
+            model = message["model"]
+        usage = message.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        fields = {
+            "input": usage.get("input_tokens", 0) or 0,
+            "cache_read": usage.get("cache_read_input_tokens", 0) or 0,
+            "cache_creation": usage.get("cache_creation_input_tokens", 0) or 0,
+            "output": usage.get("output_tokens", 0) or 0,
+        }
+        last = fields
+        for key, value in fields.items():
+            totals[key] += value
+    return {"model": model, "last": last, "totals": totals}
+
+
 def last_assistant_snippet(loglines, max_length=280):
     """Whitespace-collapsed text of the last assistant text block, or None.
 
@@ -1641,6 +1889,7 @@ def build_card_data(
     recap,
     card_prompts,
     latest_link,
+    usage_detail=None,
 ):
     """Assemble the session-card payload shared by both static generators.
 
@@ -1665,6 +1914,7 @@ def build_card_data(
             "commits": total_commits,
         },
         "usage": usage,
+        "usage_detail": usage_detail,
         "recap": recap_obj,
         "prompts": card_prompts,
         "latest_link": latest_link,
@@ -1695,6 +1945,9 @@ def new_live_stats():
         "commits": 0,
         "context_tokens": None,
         "output_tokens": 0,
+        "model": None,
+        "last_usage": None,
+        "usage_totals": {"input": 0, "cache_read": 0, "cache_creation": 0, "output": 0},
     }
 
 
@@ -1721,16 +1974,28 @@ def accumulate_live_stats(state, entry):
     if is_prompt:
         state["prompts"] += 1
     if entry.get("type") == "assistant":
-        usage = entry.get("message", {}).get("usage")
+        message = entry.get("message", {})
+        if message.get("model"):
+            state["model"] = message["model"]
+        usage = message.get("usage")
         if isinstance(usage, dict):
-            # Same semantics as compute_usage_totals: latest context, summed
-            # output.
+            # Same semantics as compute_usage_totals/compute_usage_detail:
+            # latest context + breakdown, summed totals.
             state["output_tokens"] += usage.get("output_tokens", 0) or 0
             state["context_tokens"] = (
                 (usage.get("input_tokens", 0) or 0)
                 + (usage.get("cache_creation_input_tokens", 0) or 0)
                 + (usage.get("cache_read_input_tokens", 0) or 0)
             )
+            fields = {
+                "input": usage.get("input_tokens", 0) or 0,
+                "cache_read": usage.get("cache_read_input_tokens", 0) or 0,
+                "cache_creation": usage.get("cache_creation_input_tokens", 0) or 0,
+                "output": usage.get("output_tokens", 0) or 0,
+            }
+            state["last_usage"] = fields
+            for key, value in fields.items():
+                state["usage_totals"][key] += value
     return state
 
 
@@ -1743,6 +2008,9 @@ def live_stats_payload(state):
         "commits": state["commits"],
         "context_tokens": state["context_tokens"],
         "output_tokens": state["output_tokens"],
+        "model": state["model"],
+        "last": state["last_usage"],
+        "totals": state["usage_totals"],
     }
 
 
@@ -1877,6 +2145,10 @@ LIVE_JS = r"""
   // SSE handlers below feed it.
   var card = window.sessionCard || null;
   if (card) card.init(null);
+  // Title changes after the first become chapter dividers in the prompt
+  // list; reset (truncation replay) re-arms the counter so the replayed
+  // first title doesn't spawn a spurious divider.
+  var titleCount = 0;
 
   function nearBottom() {
     return (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 120);
@@ -1896,6 +2168,7 @@ LIVE_JS = r"""
     if (messages) messages.innerHTML = '';
     if (tocList) tocList.innerHTML = '';
     setCount('stat-prompts', 0); setCount('stat-messages', 0); setCount('stat-tools', 0); setCount('stat-commits', 0);
+    titleCount = 0;
     if (card) card.reset();
   });
   es.addEventListener('append', function (e) {
@@ -1938,6 +2211,8 @@ LIVE_JS = r"""
     if (card) {
       card.setStats(s);
       card.setUsage({ context_tokens: s.context_tokens, output_tokens: s.output_tokens });
+      card.setUsageDetail({ model: s.model, last: s.last, totals: s.totals });
+      card.recordContext(s.prompts, s.context_tokens);
     }
   });
   es.addEventListener('title', function (e) {
@@ -1946,11 +2221,19 @@ LIVE_JS = r"""
     document.title = t + ' (live)';
     var h = document.getElementById('session-title');
     if (h) h.textContent = t; // textContent: never parsed as HTML
-    if (card) card.setTitle(t);
+    if (card) {
+      card.setTitle(t);
+      titleCount += 1;
+      if (titleCount > 1) card.addChapter(t); // server already dedupes
+    }
   });
   es.addEventListener('recap', function (e) {
     var r = JSON.parse(e.data);
     if (card && r.text) card.setRecap(r.text, true);
+  });
+  es.addEventListener('artifact', function (e) {
+    var a = JSON.parse(e.data);
+    if (card) card.addArtifact(a.prompt, a);
   });
 })();
 """
@@ -2043,6 +2326,10 @@ class _LiveHandler(BaseHTTPRequestHandler):
             state = new_live_stats()
             last_title = None
             last_recap = None
+            # {"id","label"} of the open turn's final text block — emitted as
+            # a retroactive completion artifact when the next prompt proves
+            # the turn ended.
+            pending_completion = None
             while not stop_event.is_set():
                 if not path.exists():
                     if stop_event.wait(poll):
@@ -2055,6 +2342,7 @@ class _LiveHandler(BaseHTTPRequestHandler):
                     state = new_live_stats()
                     last_title = None
                     last_recap = None
+                    pending_completion = None
                 loglines, offset = read_new_loglines(path, offset)
                 changed = False
                 for entry in loglines:
@@ -2077,9 +2365,26 @@ class _LiveHandler(BaseHTTPRequestHandler):
                     if not fragment:
                         continue
                     self._sse_write(format_sse_event("append", {"html": str(fragment)}))
+                    prev_prompts = state["prompts"]
                     accumulate_live_stats(state, entry)
                     is_prompt, preview = index_prompt(entry)
                     if is_prompt:
+                        # The previous turn provably ended: its final reply
+                        # becomes that prompt's completion artifact, emitted
+                        # BEFORE the new prompt event.
+                        if pending_completion and prev_prompts > 0:
+                            self._sse_write(
+                                format_sse_event(
+                                    "artifact",
+                                    {
+                                        "prompt": prev_prompts,
+                                        "type": "completion",
+                                        "label": pending_completion["label"],
+                                        "id": pending_completion["id"],
+                                    },
+                                )
+                            )
+                        pending_completion = None
                         ts = entry.get("timestamp", "")
                         self._sse_write(
                             format_sse_event(
@@ -2092,6 +2397,16 @@ class _LiveHandler(BaseHTTPRequestHandler):
                                 },
                             )
                         )
+                    if state["prompts"] > 0 and entry.get("type") == "assistant":
+                        immediate, last_text = extract_entry_artifacts(entry)
+                        for art in immediate:
+                            self._sse_write(
+                                format_sse_event(
+                                    "artifact", dict(art, prompt=state["prompts"])
+                                )
+                            )
+                        if last_text:
+                            pending_completion = last_text
                     changed = True
                 if changed:
                     self._sse_write(
@@ -2247,6 +2562,11 @@ details.continuation[open] summary { border-radius: 12px 12px 0 0; margin-bottom
 .index-commit-header { display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem; margin-bottom: 4px; }
 .index-commit-hash { font-family: monospace; color: #e65100; font-weight: 600; }
 .index-commit-msg { color: #5d4037; }
+.index-chapter { text-align: center; color: var(--text-muted); font-weight: 600; font-size: 0.85rem; margin: 20px 0 12px; }
+.index-artifacts { display: flex; flex-direction: column; gap: 2px; padding: 6px 16px 10px 32px; border-top: 1px solid rgba(0,0,0,0.06); font-size: 0.85rem; }
+.index-artifact { color: var(--text-muted); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.index-artifact:hover { color: var(--text-color); text-decoration: underline; }
+.index-artifact-icon { display: inline-block; width: 1.4em; }
 .index-item-long-text { margin-top: 8px; padding: 12px; background: var(--card-bg); border-radius: 8px; border-left: 3px solid var(--assistant-border); }
 .index-item-long-text .truncatable.truncated::after { background: linear-gradient(to bottom, transparent, var(--card-bg)); }
 .index-item-long-text-content { color: var(--text-color); }
@@ -2383,10 +2703,30 @@ CARD_CSS = """
 #session-card .card-close { background: transparent; border: none; cursor: pointer; font-size: 1.1rem; color: var(--text-muted); padding: 0 2px; line-height: 1; }
 #session-card .card-close:hover { color: var(--text-color); }
 #session-card .card-stats { color: var(--text-muted); margin-bottom: 6px; }
-#session-card .card-usage { color: var(--text-muted); margin-bottom: 8px; }
+#session-card .card-usage { color: var(--text-muted); margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#session-card .card-usage-toggle { background: transparent; border: none; cursor: pointer; color: var(--text-muted); font-size: 0.75rem; padding: 0; }
+#session-card .card-usage-toggle:hover { color: var(--text-color); }
+#session-card .card-usage-detail { margin-bottom: 8px; }
+#session-card .card-usage-model { font-family: monospace; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px; }
+#session-card .card-usage-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; color: var(--text-muted); }
+#session-card .card-usage-table th { text-align: right; font-weight: 600; padding: 1px 4px; }
+#session-card .card-usage-table td { padding: 1px 4px; }
+#session-card .card-usage-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+#session-card .ctx-bars { display: flex; align-items: flex-end; gap: 2px; height: 44px; margin-top: 4px; }
+#session-card .ctx-bar { flex: 1; height: 100%; display: flex; align-items: flex-end; cursor: pointer; background: rgba(0,0,0,0.04); border-radius: 2px; }
+#session-card .ctx-bar:hover { background: rgba(25, 118, 210, 0.12); }
+#session-card .ctx-bar-fill { width: 100%; background: var(--user-border); border-radius: 2px; }
 #session-card .card-section-label { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin: 8px 0 4px; }
 #session-card .card-recap-text { background: var(--thinking-bg); border-left: 3px solid var(--thinking-border); border-radius: 6px; padding: 8px 10px; }
 #session-card .card-prompt-list { margin: 0; padding-left: 22px; max-height: 32vh; overflow-y: auto; }
+#session-card .card-chapter { list-style: none; margin: 6px 0 2px -22px; text-align: center; color: var(--text-muted); font-weight: 600; font-size: 0.75rem; }
+#session-card .card-prompt-toggle { background: transparent; border: none; cursor: pointer; color: var(--text-muted); font-size: 0.75rem; padding: 0 4px 0 0; margin-left: -14px; }
+#session-card .card-prompt-toggle:hover { color: var(--text-color); }
+#session-card .card-artifacts { list-style: none; margin: 2px 0 4px; padding-left: 14px; }
+#session-card .card-artifact { margin: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#session-card .card-artifact a { color: var(--text-muted); text-decoration: none; }
+#session-card .card-artifact a:hover { color: var(--text-color); text-decoration: underline; }
+#session-card .card-artifact-icon { display: inline-block; width: 1.3em; }
 #session-card .card-prompt-list li { margin: 2px 0; }
 #session-card .card-prompt-list a { color: inherit; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; max-width: 100%; }
 #session-card .card-prompt-list a:hover { text-decoration: underline; }
@@ -2399,11 +2739,18 @@ CARD_CSS = """
 CARD_JS = r"""
 (function () {
   var STORAGE_KEY = 'cct-card-expanded';
+  var USAGE_KEY = 'cct-usage-detail';
+  var ICONS = { insight: '★', thinking: '💭', plan: '📋', completion: '✓' };
   var root = null;
   var refs = {};
   var statsState = { prompts: 0, messages: 0, tool_calls: 0, commits: 0 };
   var lastCtx = null;
   var recapPinned = false; // a real recap beats assistant-text fallbacks
+  var promptItems = {}; // num -> {li, toggle, sublist}
+  var promptHrefs = {}; // num -> href (context bars + artifact fallbacks)
+  var artifactByAnchor = {}; // anchor id -> {li, icon} for retype-in-place
+  var ctxSeries = {}; // prompt num -> context tokens (bars)
+  var usageDetail = null; // {model, last, totals}
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -2450,9 +2797,24 @@ CARD_JS = r"""
 
     refs.stats = el('div', 'card-stats', '');
     panel.appendChild(refs.stats);
-    refs.usage = el('div', 'card-usage', '');
+    refs.usage = el('div', 'card-usage');
     refs.usage.hidden = true;
+    refs.usageText = el('span', 'card-usage-text', '');
+    refs.usageToggle = el('button', 'card-usage-toggle', '▸ details');
+    refs.usageToggle.type = 'button';
+    refs.usageToggle.hidden = true; // shown when a breakdown exists
+    refs.usage.appendChild(refs.usageText);
+    refs.usage.appendChild(refs.usageToggle);
     panel.appendChild(refs.usage);
+    refs.usageDetail = el('div', 'card-usage-detail');
+    refs.usageDetail.hidden = true;
+    panel.appendChild(refs.usageDetail);
+    refs.usageToggle.addEventListener('click', function () {
+      var open = refs.usageDetail.hidden;
+      refs.usageDetail.hidden = !open;
+      refs.usageToggle.textContent = (open ? '▾' : '▸') + ' details';
+      try { localStorage.setItem(USAGE_KEY, open ? '1' : '0'); } catch (e) {}
+    });
 
     refs.recapWrap = el('div', 'card-recap');
     refs.recapWrap.hidden = true;
@@ -2520,9 +2882,87 @@ CARD_JS = r"""
     var parts = [];
     if (ctx) parts.push('Context ' + ctx);
     if (out) parts.push('Output ' + out);
-    refs.usage.textContent = parts.join(' · ');
+    refs.usageText.textContent = parts.join(' · ');
     refs.usage.hidden = false;
     updatePill();
+  }
+  function fmtNum(n) {
+    return n == null ? '—' : Number(n).toLocaleString();
+  }
+  function setUsageDetail(d) {
+    usageDetail = d && d.last ? d : null;
+    renderUsageDetail();
+  }
+  function renderUsageDetail() {
+    if (!refs.usageDetail) return;
+    if (!usageDetail) {
+      refs.usageToggle.hidden = true;
+      refs.usageDetail.hidden = true;
+      return;
+    }
+    refs.usageToggle.hidden = false;
+    refs.usageDetail.innerHTML = '';
+    if (usageDetail.model) {
+      refs.usageDetail.appendChild(
+        el('div', 'card-usage-model', usageDetail.model)
+      );
+    }
+    var table = el('table', 'card-usage-table');
+    var head = el('tr');
+    head.appendChild(el('th', null, ''));
+    head.appendChild(el('th', null, 'latest'));
+    head.appendChild(el('th', null, 'total'));
+    table.appendChild(head);
+    [
+      ['input', 'input'],
+      ['cache read', 'cache_read'],
+      ['cache create', 'cache_creation'],
+      ['output', 'output']
+    ].forEach(function (row) {
+      var tr = el('tr');
+      tr.appendChild(el('td', null, row[0]));
+      tr.appendChild(el('td', 'num', fmtNum(usageDetail.last ? usageDetail.last[row[1]] : null)));
+      tr.appendChild(el('td', 'num', fmtNum(usageDetail.totals ? usageDetail.totals[row[1]] : null)));
+      table.appendChild(tr);
+    });
+    refs.usageDetail.appendChild(table);
+    refs.usageDetail.appendChild(el('div', 'card-section-label', 'Context by prompt'));
+    refs.bars = el('div', 'ctx-bars');
+    refs.usageDetail.appendChild(refs.bars);
+    renderBars();
+    var open = false;
+    try { open = localStorage.getItem(USAGE_KEY) === '1'; } catch (e) {}
+    refs.usageDetail.hidden = !open;
+    refs.usageToggle.textContent = (open ? '▾' : '▸') + ' details';
+  }
+  function renderBars() {
+    if (!refs.bars) return;
+    refs.bars.innerHTML = '';
+    var nums = Object.keys(ctxSeries).map(Number);
+    if (!nums.length) return;
+    var max = 0;
+    nums.forEach(function (n) { if (ctxSeries[n] > max) max = ctxSeries[n]; });
+    var total = Math.max(statsState.prompts || 0, Math.max.apply(null, nums));
+    for (var n = 1; n <= total; n++) {
+      var bar = el('div', 'ctx-bar');
+      var v = ctxSeries[n];
+      var fill = el('div', 'ctx-bar-fill');
+      fill.style.height = v && max ? Math.max(8, Math.round((v / max) * 100)) + '%' : '0%';
+      bar.title = '#' + n + (v ? ' · ' + formatTokens(v) : '');
+      bar.appendChild(fill);
+      (function (num) {
+        bar.addEventListener('click', function () {
+          var href = promptHrefs[num];
+          if (href) location.href = href;
+        });
+      })(n);
+      refs.bars.appendChild(bar);
+    }
+  }
+  function recordContext(num, ctx) {
+    if (!num || ctx == null) return;
+    ctxSeries[num] = ctx;
+    renderBars();
   }
   function setRecap(text, isReal) {
     if (!refs.recapWrap || !text) return;
@@ -2535,15 +2975,64 @@ CARD_JS = r"""
   function addPrompt(p) {
     if (!refs.promptList || !p) return;
     var li = el('li');
+    var toggle = el('button', 'card-prompt-toggle', '▸');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-label', 'Show artifacts');
+    toggle.hidden = true; // revealed when the first artifact arrives
     var a = el('a', null, '#' + p.num + '  ' + p.preview);
     a.href = p.link || ('#' + p.id);
+    li.appendChild(toggle);
     li.appendChild(a);
     refs.promptList.appendChild(li);
+    promptHrefs[p.num] = a.href;
+    var item = { li: li, toggle: toggle, sublist: null };
+    promptItems[p.num] = item;
+    toggle.addEventListener('click', function () {
+      if (!item.sublist) return;
+      var open = item.sublist.hidden;
+      item.sublist.hidden = !open;
+      toggle.textContent = open ? '▾' : '▸';
+    });
+    (p.artifacts || []).forEach(function (art) { addArtifact(p.num, art); });
+  }
+  function addArtifact(num, a) {
+    if (!a || !a.id) return;
+    var existing = artifactByAnchor[a.id];
+    if (existing) {
+      // Retype in place: a completion that re-targets an insight block swaps
+      // type/icon but keeps the richer insight label.
+      existing.li.className = 'card-artifact card-artifact-' + a.type;
+      existing.icon.textContent = ICONS[a.type] || '•';
+      return;
+    }
+    var item = promptItems[num];
+    if (!item) return;
+    if (!item.sublist) {
+      item.sublist = el('ol', 'card-artifacts');
+      item.sublist.hidden = true; // collapsed by default
+      item.li.appendChild(item.sublist);
+      item.toggle.hidden = false;
+    }
+    var li = el('li', 'card-artifact card-artifact-' + a.type);
+    var icon = el('span', 'card-artifact-icon', ICONS[a.type] || '•');
+    var link = el('a', null, a.label || a.type);
+    link.href = a.link || ('#' + a.id);
+    li.appendChild(icon);
+    li.appendChild(link);
+    item.sublist.appendChild(li);
+    artifactByAnchor[a.id] = { li: li, icon: icon };
+  }
+  function addChapter(title) {
+    if (!refs.promptList || !title) return;
+    refs.promptList.appendChild(el('li', 'card-chapter', '── ' + title + ' ──'));
   }
   function setPrompts(list) {
     if (!refs.promptList) return;
     refs.promptList.innerHTML = '';
-    (list || []).forEach(addPrompt);
+    (list || []).forEach(function (item) {
+      if (item && item.kind === 'chapter') addChapter(item.title);
+      else addPrompt(item);
+    });
   }
   function setLatestLink(href) {
     if (!refs.latestBtn || !href) return;
@@ -2553,10 +3042,16 @@ CARD_JS = r"""
   function reset() {
     recapPinned = false;
     lastCtx = null;
+    promptItems = {};
+    promptHrefs = {};
+    artifactByAnchor = {};
+    ctxSeries = {};
+    usageDetail = null;
     setStats({ prompts: 0, messages: 0, tool_calls: 0, commits: 0 });
     if (refs.usage) refs.usage.hidden = true;
     if (refs.recapWrap) refs.recapWrap.hidden = true;
     if (refs.promptList) refs.promptList.innerHTML = '';
+    renderUsageDetail();
   }
   function init(data) {
     if (!build()) return;
@@ -2565,6 +3060,12 @@ CARD_JS = r"""
     setTitle(data.title);
     setStats(data.stats);
     setUsage(data.usage);
+    if (data.usage_detail) {
+      (data.usage_detail.context_by_prompt || []).forEach(function (e) {
+        if (e && e.context_tokens != null) ctxSeries[e.num] = e.context_tokens;
+      });
+      setUsageDetail(data.usage_detail);
+    }
     if (data.recap && data.recap.text) {
       setRecap(data.recap.text, data.recap.source === 'recap');
     }
@@ -2574,8 +3075,10 @@ CARD_JS = r"""
 
   window.sessionCard = {
     init: init, reset: reset, setTitle: setTitle, setStats: setStats,
-    setUsage: setUsage, setRecap: setRecap, addPrompt: addPrompt,
-    setPrompts: setPrompts, setLatestLink: setLatestLink
+    setUsage: setUsage, setUsageDetail: setUsageDetail,
+    recordContext: recordContext, setRecap: setRecap, addPrompt: addPrompt,
+    addArtifact: addArtifact, addChapter: addChapter, setPrompts: setPrompts,
+    setLatestLink: setLatestLink
   };
 
   // Static pages: auto-init from the embedded JSON payload.
@@ -2740,42 +3243,12 @@ def generate_index_pagination_html(total_pages):
     return _macros.index_pagination(total_pages)
 
 
-def generate_html(json_path, output_dir, github_repo=None, title=None, recap=None):
-    output_dir = Path(output_dir)
-    output_dir.mkdir(exist_ok=True)
+def _build_conversations(loglines):
+    """Group loglines into prompt-led conversations.
 
-    if title is None:
-        # CLI path: one scan yields both the name and the recap. Batch callers
-        # (generate_batch_html) pass both in from the scan they already did.
-        json_path_p = Path(json_path)
-        if json_path_p.suffix == ".jsonl":
-            meta = scan_session_metadata(json_path_p, max_length=80)
-            if meta.title and meta.title != "(no summary)":
-                title = meta.title
-            if recap is None:
-                recap = meta.recap
-        else:
-            title = get_session_title(json_path)
-
-    # Load session file (supports both JSON and JSONL)
-    data = parse_session_file(json_path)
-
-    loglines = data.get("loglines", [])
-
-    # Auto-detect GitHub repo if not provided
-    if github_repo is None:
-        github_repo = detect_github_repo(loglines)
-        if github_repo:
-            print(f"Auto-detected GitHub repo: {github_repo}")
-        else:
-            print(
-                "Warning: Could not auto-detect GitHub repo. Commit links will be disabled."
-            )
-
-    # Set module-level variable for render functions
-    global _github_repo
-    _github_repo = github_repo
-
+    Each conversation starts at a user message with visible text and carries
+    every following entry until the next one. Shared by both generators.
+    """
     conversations = []
     current_conv = None
     for entry in loglines:
@@ -2808,6 +3281,20 @@ def generate_html(json_path, output_dir, github_repo=None, title=None, recap=Non
             current_conv["messages"].append((log_type, message_json, timestamp))
     if current_conv:
         conversations.append(current_conv)
+    return conversations
+
+
+def _render_session_pages(
+    loglines, output_dir, title, recap, title_changes=None, echo=print
+):
+    """Shared session-page core: stats, timeline, card payload, pages + index.
+
+    Callers resolve title/recap/title_changes and set the _github_repo global
+    first; `echo` is print (file path) or click.echo (web path) for progress
+    lines. title_changes ((anchor_ts, title), ...) become chapter dividers
+    before the first prompt whose timestamp exceeds each anchor.
+    """
+    conversations = _build_conversations(loglines)
 
     total_convs = len(conversations)
     total_pages = (total_convs + PROMPTS_PER_PAGE - 1) // PROMPTS_PER_PAGE
@@ -2831,6 +3318,8 @@ def generate_html(json_path, output_dir, github_repo=None, title=None, recap=Non
     # Build timeline items: prompts and commits merged by timestamp
     timeline_items = []
     card_prompts = []
+    context_by_prompt = []
+    pending_chapters = list(title_changes or ())
 
     # Add prompts
     prompt_num = 0
@@ -2844,6 +3333,39 @@ def generate_html(json_path, output_dir, github_repo=None, title=None, recap=Non
         msg_id = make_msg_id(conv["timestamp"])
         link = f"page-{page_num:03d}.html#{msg_id}"
         rendered_content = render_markdown_text(conv["user_text"])
+        # Chapter dividers: a title change anchored before this prompt slots
+        # in just above it. The timeline item shares this prompt's timestamp
+        # and is appended first, so the stable sort keeps it directly above.
+        # Changes with no later prompt are dropped (nothing to head).
+        while pending_chapters and conv["timestamp"] > pending_chapters[0][0]:
+            _, chapter_title = pending_chapters.pop(0)
+            card_prompts.append({"kind": "chapter", "title": chapter_title})
+            timeline_items.append(
+                (conv["timestamp"], "chapter", _macros.index_chapter(chapter_title))
+            )
+        # Collect all messages including from subsequent continuation
+        # conversations (long_texts/artifacts belong to the original prompt).
+        # Each continuation keeps ITS page so artifact links stay correct
+        # when a conversation crosses a page boundary.
+        all_messages = list(conv["messages"])
+        message_groups = [(page_num, conv["messages"])]
+        for j in range(i + 1, len(conversations)):
+            if not conversations[j].get("is_continuation"):
+                break
+            all_messages.extend(conversations[j]["messages"])
+            message_groups.append(
+                ((j // PROMPTS_PER_PAGE) + 1, conversations[j]["messages"])
+            )
+
+        artifacts = [
+            {
+                "type": a["type"],
+                "label": a["label"],
+                "id": a["anchor"],
+                "link": f"page-{a['page']:03d}.html#{a['anchor']}",
+            }
+            for a in extract_conversation_artifacts(message_groups)
+        ]
         card_prompts.append(
             {
                 "num": prompt_num,
@@ -2851,20 +3373,16 @@ def generate_html(json_path, output_dir, github_repo=None, title=None, recap=Non
                 "link": link,
                 "preview": prompt_preview(conv["user_text"]),
                 "timestamp": conv["timestamp"],
+                "artifacts": artifacts,
             }
         )
-
-        # Collect all messages including from subsequent continuation conversations
-        # This ensures long_texts from continuations appear with the original prompt
-        all_messages = list(conv["messages"])
-        for j in range(i + 1, len(conversations)):
-            if not conversations[j].get("is_continuation"):
-                break
-            all_messages.extend(conversations[j]["messages"])
 
         # Analyze conversation for stats (excluding commits from inline display now)
         stats = analyze_conversation(all_messages)
         tool_stats_str = format_tool_stats(stats["tool_counts"])
+        context_by_prompt.append(
+            {"num": prompt_num, "context_tokens": stats["context_tokens"]}
+        )
 
         long_texts_html = ""
         for lt in stats["long_texts"]:
@@ -2873,8 +3391,20 @@ def generate_html(json_path, output_dir, github_repo=None, title=None, recap=Non
 
         stats_html = _macros.index_stats(tool_stats_str, long_texts_html)
 
+        artifacts_html = (
+            _macros.index_artifacts(
+                [dict(a, icon=ARTIFACT_ICONS.get(a["type"], "•")) for a in artifacts]
+            )
+            if artifacts
+            else ""
+        )
         item_html = _macros.index_item(
-            prompt_num, link, conv["timestamp"], rendered_content, stats_html
+            prompt_num,
+            link,
+            conv["timestamp"],
+            rendered_content,
+            stats_html,
+            artifacts_html,
         )
         timeline_items.append((conv["timestamp"], "prompt", item_html))
 
@@ -2897,6 +3427,8 @@ def generate_html(json_path, output_dir, github_repo=None, title=None, recap=Non
     else:
         latest_link = None
 
+    usage_detail = compute_usage_detail(loglines)
+    usage_detail["context_by_prompt"] = context_by_prompt
     card_data = build_card_data(
         title,
         prompt_num,
@@ -2907,6 +3439,7 @@ def generate_html(json_path, output_dir, github_repo=None, title=None, recap=Non
         recap,
         card_prompts,
         latest_link,
+        usage_detail=usage_detail,
     )
     # "</" must not appear raw inside a <script> block; "<\/" is the
     # equivalent JSON escape, preventing </script> breakout.
@@ -2942,7 +3475,7 @@ def generate_html(json_path, output_dir, github_repo=None, title=None, recap=Non
         (output_dir / f"page-{page_num:03d}.html").write_text(
             page_content, encoding="utf-8"
         )
-        print(f"Generated page-{page_num:03d}.html")
+        echo(f"Generated page-{page_num:03d}.html")
 
     index_pagination = generate_index_pagination_html(total_pages)
     index_template = get_template("index.html")
@@ -2961,9 +3494,53 @@ def generate_html(json_path, output_dir, github_repo=None, title=None, recap=Non
     )
     index_path = output_dir / "index.html"
     index_path.write_text(index_content, encoding="utf-8")
-    print(
+    echo(
         f"Generated {index_path.resolve()} ({total_convs} prompts, {total_pages} pages)"
     )
+
+
+def generate_html(
+    json_path, output_dir, github_repo=None, title=None, recap=None, title_changes=None
+):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+
+    if title is None:
+        # CLI path: one scan yields the name, recap, and title changes. Batch
+        # callers (generate_batch_html) pass all three from the scan they
+        # already did.
+        json_path_p = Path(json_path)
+        if json_path_p.suffix == ".jsonl":
+            meta = scan_session_metadata(json_path_p, max_length=80)
+            if meta.title and meta.title != "(no summary)":
+                title = meta.title
+            if recap is None:
+                recap = meta.recap
+            if title_changes is None:
+                title_changes = meta.title_changes
+        else:
+            title = get_session_title(json_path)
+
+    # Load session file (supports both JSON and JSONL)
+    data = parse_session_file(json_path)
+
+    loglines = data.get("loglines", [])
+
+    # Auto-detect GitHub repo if not provided
+    if github_repo is None:
+        github_repo = detect_github_repo(loglines)
+        if github_repo:
+            print(f"Auto-detected GitHub repo: {github_repo}")
+        else:
+            print(
+                "Warning: Could not auto-detect GitHub repo. Commit links will be disabled."
+            )
+
+    # Set module-level variable for render functions
+    global _github_repo
+    _github_repo = github_repo
+
+    _render_session_pages(loglines, output_dir, title, recap, title_changes, echo=print)
 
 
 @click.group(cls=DefaultGroup, default="local", default_if_no_args=True)
@@ -3370,194 +3947,8 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
     global _github_repo
     _github_repo = github_repo
 
-    conversations = []
-    current_conv = None
-    for entry in loglines:
-        log_type = entry.get("type")
-        timestamp = entry.get("timestamp", "")
-        is_compact_summary = entry.get("isCompactSummary", False)
-        message_data = entry.get("message", {})
-        if not message_data:
-            continue
-        # Convert message dict to JSON string for compatibility with existing render functions
-        message_json = json.dumps(message_data)
-        is_user_prompt = False
-        user_text = None
-        if log_type == "user":
-            content = message_data.get("content", "")
-            text = extract_text_from_content(content)
-            if text:
-                is_user_prompt = True
-                user_text = text
-        if is_user_prompt:
-            if current_conv:
-                conversations.append(current_conv)
-            current_conv = {
-                "user_text": user_text,
-                "timestamp": timestamp,
-                "messages": [(log_type, message_json, timestamp)],
-                "is_continuation": bool(is_compact_summary),
-            }
-        elif current_conv:
-            current_conv["messages"].append((log_type, message_json, timestamp))
-    if current_conv:
-        conversations.append(current_conv)
-
-    total_convs = len(conversations)
-    total_pages = (total_convs + PROMPTS_PER_PAGE - 1) // PROMPTS_PER_PAGE
-
-    # Stats, commits, and the prompt timeline are computed BEFORE page
-    # rendering so the session-card payload can be embedded in every page.
-    total_tool_counts = {}
-    total_messages = 0
-    all_commits = []  # (timestamp, hash, message, page_num, conv_index)
-    for i, conv in enumerate(conversations):
-        total_messages += len(conv["messages"])
-        stats = analyze_conversation(conv["messages"])
-        for tool, count in stats["tool_counts"].items():
-            total_tool_counts[tool] = total_tool_counts.get(tool, 0) + count
-        page_num = (i // PROMPTS_PER_PAGE) + 1
-        for commit_hash, commit_msg, commit_ts in stats["commits"]:
-            all_commits.append((commit_ts, commit_hash, commit_msg, page_num, i))
-    total_tool_calls = sum(total_tool_counts.values())
-    total_commits = len(all_commits)
-
-    # Build timeline items: prompts and commits merged by timestamp
-    timeline_items = []
-    card_prompts = []
-
-    # Add prompts
-    prompt_num = 0
-    for i, conv in enumerate(conversations):
-        if conv.get("is_continuation"):
-            continue
-        if conv["user_text"].startswith("Stop hook feedback:"):
-            continue
-        prompt_num += 1
-        page_num = (i // PROMPTS_PER_PAGE) + 1
-        msg_id = make_msg_id(conv["timestamp"])
-        link = f"page-{page_num:03d}.html#{msg_id}"
-        rendered_content = render_markdown_text(conv["user_text"])
-        card_prompts.append(
-            {
-                "num": prompt_num,
-                "id": msg_id,
-                "link": link,
-                "preview": prompt_preview(conv["user_text"]),
-                "timestamp": conv["timestamp"],
-            }
-        )
-
-        # Collect all messages including from subsequent continuation conversations
-        # This ensures long_texts from continuations appear with the original prompt
-        all_messages = list(conv["messages"])
-        for j in range(i + 1, len(conversations)):
-            if not conversations[j].get("is_continuation"):
-                break
-            all_messages.extend(conversations[j]["messages"])
-
-        # Analyze conversation for stats (excluding commits from inline display now)
-        stats = analyze_conversation(all_messages)
-        tool_stats_str = format_tool_stats(stats["tool_counts"])
-
-        long_texts_html = ""
-        for lt in stats["long_texts"]:
-            rendered_lt = render_markdown_text(lt)
-            long_texts_html += _macros.index_long_text(rendered_lt)
-
-        stats_html = _macros.index_stats(tool_stats_str, long_texts_html)
-
-        item_html = _macros.index_item(
-            prompt_num, link, conv["timestamp"], rendered_content, stats_html
-        )
-        timeline_items.append((conv["timestamp"], "prompt", item_html))
-
-    # Add commits as separate timeline items
-    for commit_ts, commit_hash, commit_msg, page_num, conv_idx in all_commits:
-        item_html = _macros.index_commit(
-            commit_hash, commit_msg, commit_ts, _github_repo
-        )
-        timeline_items.append((commit_ts, "commit", item_html))
-
-    # Sort by timestamp
-    timeline_items.sort(key=lambda x: x[0])
-    index_items = [item[2] for item in timeline_items]
-
-    # Jump-to-latest targets the last message on the last page.
-    if conversations:
-        last_ts = conversations[-1]["messages"][-1][2]
-        latest_page = (len(conversations) - 1) // PROMPTS_PER_PAGE + 1
-        latest_link = f"page-{latest_page:03d}.html#{make_msg_id(last_ts)}"
-    else:
-        latest_link = None
-
-    card_data = build_card_data(
-        title,
-        prompt_num,
-        total_messages,
-        total_tool_calls,
-        total_commits,
-        loglines,
-        recap,
-        card_prompts,
-        latest_link,
-    )
-    # "</" must not appear raw inside a <script> block; "<\/" is the
-    # equivalent JSON escape, preventing </script> breakout.
-    card_json = json.dumps(card_data).replace("</", "<\\/")
-
-    for page_num in range(1, total_pages + 1):
-        start_idx = (page_num - 1) * PROMPTS_PER_PAGE
-        end_idx = min(start_idx + PROMPTS_PER_PAGE, total_convs)
-        page_convs = conversations[start_idx:end_idx]
-        messages_html = []
-        for conv in page_convs:
-            is_first = True
-            for log_type, message_json, timestamp in conv["messages"]:
-                msg_html = render_message(log_type, message_json, timestamp)
-                if msg_html:
-                    # Wrap continuation summaries in collapsed details
-                    if is_first and conv.get("is_continuation"):
-                        msg_html = f'<details class="continuation"><summary>Session continuation summary</summary>{msg_html}</details>'
-                    messages_html.append(msg_html)
-                is_first = False
-        pagination_html = generate_pagination_html(page_num, total_pages)
-        page_template = get_template("page.html")
-        page_content = page_template.render(
-            css=CSS + CARD_CSS,
-            js=JS + CARD_JS,
-            session_title=title,
-            card_json=card_json,
-            page_num=page_num,
-            total_pages=total_pages,
-            pagination_html=pagination_html,
-            messages_html="".join(messages_html),
-        )
-        (output_dir / f"page-{page_num:03d}.html").write_text(
-            page_content, encoding="utf-8"
-        )
-        click.echo(f"Generated page-{page_num:03d}.html")
-
-    index_pagination = generate_index_pagination_html(total_pages)
-    index_template = get_template("index.html")
-    index_content = index_template.render(
-        css=CSS + CARD_CSS,
-        js=JS + CARD_JS,
-        session_title=title,
-        card_json=card_json,
-        pagination_html=index_pagination,
-        prompt_num=prompt_num,
-        total_messages=total_messages,
-        total_tool_calls=total_tool_calls,
-        total_commits=total_commits,
-        total_pages=total_pages,
-        index_items_html="".join(index_items),
-    )
-    index_path = output_dir / "index.html"
-    index_path.write_text(index_content, encoding="utf-8")
-    click.echo(
-        f"Generated {index_path.resolve()} ({total_convs} prompts, {total_pages} pages)"
-    )
+    # Web exports carry no ai-title lines, so there are no chapter dividers.
+    _render_session_pages(loglines, output_dir, title, recap, None, echo=click.echo)
 
 
 @cli.command("web")

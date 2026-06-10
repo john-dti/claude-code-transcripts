@@ -1486,6 +1486,64 @@ class TestFindLocalSessions:
         assert len(results) == 3
 
 
+class TestBlockAnchors:
+    """Assistant content blocks carry stable msg-<ts>-bN ids so artifacts
+    (insights, thinking, plans) can be deep-linked."""
+
+    MSG_ID = "msg-2025-01-01T10-00-00-000Z"
+
+    def _assistant_json(self):
+        return json.dumps(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "pondering deeply"},
+                    {"type": "text", "text": "the reply"},
+                    {
+                        "type": "tool_use",
+                        "name": "ExitPlanMode",
+                        "input": {"allowedPrompts": []},
+                        "id": "t1",
+                    },
+                ],
+            }
+        )
+
+    def test_assistant_blocks_get_indexed_ids(self):
+        html_out = render_message(
+            "assistant", self._assistant_json(), "2025-01-01T10:00:00.000Z"
+        )
+        assert f'id="{self.MSG_ID}-b0"' in html_out  # thinking
+        assert f'id="{self.MSG_ID}-b1"' in html_out  # text
+        assert f'id="{self.MSG_ID}-b2"' in html_out  # generic tool_use
+
+    def test_enumeration_counts_all_blocks(self):
+        """Index = content-array position, not a per-type counter."""
+        msg = json.dumps(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "tool_use", "name": "Grep", "input": {}, "id": "t1"},
+                    {"type": "text", "text": "third"},
+                ],
+            }
+        )
+        html_out = render_message("assistant", msg, "2025-01-01T10:00:00.000Z")
+        assert f'id="{self.MSG_ID}-b0"' in html_out
+        assert f'id="{self.MSG_ID}-b2"' in html_out
+
+    def test_render_content_block_without_id_has_no_id_attr(self):
+        """Back-compat: block fragments without an anchor stay id-free."""
+        out = render_content_block({"type": "text", "text": "hi"})
+        assert "id=" not in out
+
+    def test_user_messages_carry_no_block_ids(self):
+        msg = json.dumps({"role": "user", "content": "hello"})
+        html_out = render_message("user", msg, "2025-01-01T10:00:00.000Z")
+        assert "-b0" not in html_out
+
+
 class TestSessionTitles:
     """Static pages are titled with the session's name (Claude Code's
     auto-title when present, else the summary heuristic) so browser tabs stay
@@ -1646,6 +1704,7 @@ class TestSessionCard:
                     "timestamp": f"2025-01-01T10:0{i}:30.000Z",
                     "message": {
                         "role": "assistant",
+                        "model": "claude-fable-5",
                         "content": [{"type": "text", "text": f"reply {i}"}],
                         "usage": {
                             "input_tokens": 10,
@@ -1785,6 +1844,462 @@ class TestSessionCard:
         page = (out / "page-001.html").read_text(encoding="utf-8")
         assert "#session-card" in page  # CARD_CSS shipped
         assert "sessionCard" in page  # CARD_JS shipped
+
+    def test_card_usage_detail_payload(self, tmp_path):
+        """usage_detail: model, latest-turn breakdown, totals, and per-prompt
+        context series (fixture: context = 15 + 100*i for prompt i+1)."""
+        f = self._session_jsonl(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        data = self._card_data((out / "index.html").read_text(encoding="utf-8"))
+        detail = data["usage_detail"]
+        assert detail["model"] == "claude-fable-5"
+        assert detail["last"] == {
+            "input": 10,
+            "cache_read": 500,
+            "cache_creation": 5,
+            "output": 7,
+        }
+        assert detail["totals"] == {
+            "input": 60,
+            "cache_read": 1500,
+            "cache_creation": 30,
+            "output": 42,
+        }
+        assert detail["context_by_prompt"] == [
+            {"num": i + 1, "context_tokens": 15 + 100 * i} for i in range(6)
+        ]
+        # The compact `usage` key is frozen — detail is a sibling.
+        assert data["usage"] == {"context_tokens": 515, "output_tokens": 42}
+
+    def test_card_usage_detail_null_for_web_json(self, tmp_path):
+        from claude_code_transcripts import generate_html_from_session_data
+
+        session_data = {
+            "title": "Web one",
+            "loglines": [
+                {
+                    "type": "user",
+                    "timestamp": "2025-01-01T10:00:00.000Z",
+                    "message": {"role": "user", "content": "hi"},
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2025-01-01T10:00:30.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "the reply"}],
+                    },
+                },
+            ],
+        }
+        out = tmp_path / "out"
+        generate_html_from_session_data(session_data, out)
+        detail = self._card_data((out / "index.html").read_text(encoding="utf-8"))[
+            "usage_detail"
+        ]
+        assert detail["last"] is None
+        assert detail["context_by_prompt"] == [{"num": 1, "context_tokens": None}]
+
+    def test_card_js_has_usage_detail_api(self, tmp_path):
+        f = self._session_jsonl(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        page = (out / "page-001.html").read_text(encoding="utf-8")
+        assert "setUsageDetail" in page
+        assert "recordContext" in page
+        assert "cct-usage-detail" in page  # persisted toggle
+
+
+class TestTitleChapters:
+    """ai-title changes appear as chapter dividers in the card prompt list
+    and the index timeline, before the first prompt after the change."""
+
+    def _session_with_change(self, tmp_path):
+        """4 prompts; the title changes during turn 2 -> divider before #3."""
+        lines = [{"type": "ai-title", "aiTitle": "Phase one", "sessionId": "x"}]
+        for i in range(4):
+            lines.append(
+                {
+                    "type": "user",
+                    "timestamp": f"2025-01-01T10:0{i}:00.000Z",
+                    "message": {"role": "user", "content": f"prompt number {i}"},
+                }
+            )
+            lines.append(
+                {
+                    "type": "assistant",
+                    "timestamp": f"2025-01-01T10:0{i}:30.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": f"reply {i}"}],
+                    },
+                }
+            )
+            if i == 1:
+                lines.append(
+                    {"type": "ai-title", "aiTitle": "Phase two", "sessionId": "x"}
+                )
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        return f
+
+    def _card_data(self, html_text):
+        blob = html_text.split('id="session-card-data"')[1]
+        blob = blob.split(">", 1)[1].split("</script>")[0]
+        return json.loads(blob)
+
+    def test_card_payload_interleaves_chapter_before_next_prompt(self, tmp_path):
+        f = self._session_with_change(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        prompts = self._card_data((out / "index.html").read_text(encoding="utf-8"))[
+            "prompts"
+        ]
+        kinds = [p.get("kind", "prompt") for p in prompts]
+        assert kinds == ["prompt", "prompt", "chapter", "prompt", "prompt"]
+        assert prompts[2]["title"] == "Phase two"
+        assert prompts[3]["num"] == 3  # divider precedes prompt #3
+
+    def test_index_timeline_has_chapter_heading_between_items(self, tmp_path):
+        f = self._session_with_change(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        index = (out / "index.html").read_text(encoding="utf-8")
+        chapter_pos = index.find('class="index-chapter"')
+        assert chapter_pos != -1
+        assert "Phase two" in index[chapter_pos : chapter_pos + 200]
+        p2_pos = index.find('class="index-item-number">#2')
+        p3_pos = index.find('class="index-item-number">#3')
+        assert p2_pos < chapter_pos < p3_pos
+
+    def test_stable_title_session_has_no_chapters(self, tmp_path):
+        lines = [
+            {"type": "ai-title", "aiTitle": "Only name", "sessionId": "x"},
+            {
+                "type": "user",
+                "timestamp": "2025-01-01T10:00:00.000Z",
+                "message": {"role": "user", "content": "hello"},
+            },
+            {"type": "ai-title", "aiTitle": "Only name", "sessionId": "x"},
+        ]
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        out = tmp_path / "out"
+        generate_html(f, out)
+        index = (out / "index.html").read_text(encoding="utf-8")
+        assert 'class="index-chapter"' not in index
+        prompts = self._card_data(index)["prompts"]
+        assert all("kind" not in p for p in prompts)
+
+    def test_change_after_last_prompt_dropped(self, tmp_path):
+        lines = [
+            {"type": "ai-title", "aiTitle": "First", "sessionId": "x"},
+            {
+                "type": "user",
+                "timestamp": "2025-01-01T10:00:00.000Z",
+                "message": {"role": "user", "content": "only prompt"},
+            },
+            {"type": "ai-title", "aiTitle": "Renamed at the end", "sessionId": "x"},
+        ]
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        out = tmp_path / "out"
+        generate_html(f, out)
+        index = (out / "index.html").read_text(encoding="utf-8")
+        assert 'class="index-chapter"' not in index
+
+    def test_explicit_title_changes_param_wins(self, tmp_path):
+        f = self._session_with_change(tmp_path)
+        out = tmp_path / "out"
+        generate_html(
+            f, out, title="Override", title_changes=(("", "Injected chapter"),)
+        )
+        prompts = self._card_data((out / "index.html").read_text(encoding="utf-8"))[
+            "prompts"
+        ]
+        assert prompts[0] == {"kind": "chapter", "title": "Injected chapter"}
+        assert "Phase two" not in json.dumps(prompts)
+
+    def test_batch_threads_title_changes(self, tmp_path):
+        from claude_code_transcripts import generate_batch_html
+
+        projects = tmp_path / "projects" / "D--projects-devjig"
+        projects.mkdir(parents=True)
+        self._session_with_change(projects)
+        out = tmp_path / "archive"
+        generate_batch_html(tmp_path / "projects", out)
+        content = (out / "devjig" / "s" / "index.html").read_text(encoding="utf-8")
+        assert 'class="index-chapter"' in content
+
+
+class TestAnalyzeConversationContext:
+    """analyze_conversation additionally reports the conversation's final
+    context size (last assistant usage), feeding the per-prompt context bars."""
+
+    def _assistant(self, usage, ts="T"):
+        return (
+            "assistant",
+            json.dumps(
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "r"}],
+                    "usage": usage,
+                }
+            ),
+            ts,
+        )
+
+    def test_context_tokens_last_usage_wins(self):
+        messages = [
+            self._assistant(
+                {
+                    "input_tokens": 1,
+                    "cache_creation_input_tokens": 2,
+                    "cache_read_input_tokens": 3,
+                    "output_tokens": 9,
+                },
+                "T1",
+            ),
+            self._assistant(
+                {
+                    "input_tokens": 10,
+                    "cache_creation_input_tokens": 20,
+                    "cache_read_input_tokens": 300,
+                    "output_tokens": 9,
+                },
+                "T2",
+            ),
+        ]
+        assert analyze_conversation(messages)["context_tokens"] == 330
+
+    def test_context_tokens_none_without_usage(self):
+        messages = [
+            (
+                "assistant",
+                json.dumps(
+                    {"role": "assistant", "content": [{"type": "text", "text": "r"}]}
+                ),
+                "T1",
+            )
+        ]
+        assert analyze_conversation(messages)["context_tokens"] is None
+
+
+INSIGHT_BLOCK_TEXT = (
+    "`★ Insight ─────────────────────────────────────`\n"
+    "- Anchors are assigned by content position\n"
+    "`─────────────────────────────────────────────────`"
+)
+
+
+class TestArtifactLinks:
+    """Artifacts (insights, substantial thinking, plans, completions) are
+    deep-linked from the card prompt tree and the index timeline."""
+
+    def _session(self, tmp_path):
+        """5 prompts + a continuation that crosses onto page 2. Prompt #5 is
+        the rich one: long thinking, insight, ExitPlanMode, mid reply — with
+        its final reply arriving in the continuation (page 2)."""
+        lines = [{"type": "ai-title", "aiTitle": "Artifact demo", "sessionId": "x"}]
+        for i in range(4):
+            lines.append(
+                {
+                    "type": "user",
+                    "timestamp": f"2025-01-01T10:0{i}:00.000Z",
+                    "message": {"role": "user", "content": f"prompt number {i}"},
+                }
+            )
+            lines.append(
+                {
+                    "type": "assistant",
+                    "timestamp": f"2025-01-01T10:0{i}:30.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": f"reply {i}"}],
+                    },
+                }
+            )
+        lines.append(
+            {
+                "type": "user",
+                "timestamp": "2025-01-01T10:04:00.000Z",
+                "message": {"role": "user", "content": "the rich prompt"},
+            }
+        )
+        lines.append(
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-01T10:04:30.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "deep thought " * 30},
+                        {"type": "text", "text": INSIGHT_BLOCK_TEXT},
+                        {
+                            "type": "tool_use",
+                            "name": "ExitPlanMode",
+                            "input": {"allowedPrompts": []},
+                            "id": "t-plan",
+                        },
+                        {"type": "text", "text": "mid reply"},
+                    ],
+                },
+            }
+        )
+        # Continuation conversation -> conv index 5 -> page 2.
+        lines.append(
+            {
+                "type": "user",
+                "timestamp": "2025-01-01T10:05:00.000Z",
+                "isCompactSummary": True,
+                "message": {"role": "user", "content": "continuation summary"},
+            }
+        )
+        lines.append(
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-01T10:05:30.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "final reply after continuation"}
+                    ],
+                },
+            }
+        )
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        return f
+
+    def _card_data(self, html_text):
+        blob = html_text.split('id="session-card-data"')[1]
+        blob = blob.split(">", 1)[1].split("</script>")[0]
+        return json.loads(blob)
+
+    def test_prompt_payload_carries_typed_artifacts(self, tmp_path):
+        f = self._session(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        prompts = self._card_data((out / "index.html").read_text(encoding="utf-8"))[
+            "prompts"
+        ]
+        assert [a["type"] for a in prompts[0]["artifacts"]] == ["completion"]
+        rich = prompts[4]
+        types = [a["type"] for a in rich["artifacts"]]
+        assert types == ["thinking", "insight", "plan", "completion"]
+        thinking, insight, plan, completion = rich["artifacts"]
+        assert thinking["link"].startswith("page-001.html#msg-")
+        assert thinking["id"].endswith("-b0")
+        assert insight["label"] == "Anchors are assigned by content position"
+        assert plan["label"] == "Plan presented"
+        # The final reply arrived in the continuation -> page 2.
+        assert completion["link"].startswith("page-002.html#msg-")
+        assert completion["label"] == "final reply after continuation"
+
+    def test_completion_dedupe_retypes_insight(self, tmp_path):
+        lines = [
+            {
+                "type": "user",
+                "timestamp": "2025-01-01T10:00:00.000Z",
+                "message": {"role": "user", "content": "go"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-01T10:00:30.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": INSIGHT_BLOCK_TEXT}],
+                },
+            },
+        ]
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        out = tmp_path / "out"
+        generate_html(f, out)
+        prompts = self._card_data((out / "index.html").read_text(encoding="utf-8"))[
+            "prompts"
+        ]
+        arts = prompts[0]["artifacts"]
+        assert len(arts) == 1  # retyped, not duplicated
+        assert arts[0]["type"] == "completion"
+        assert arts[0]["label"] == "Anchors are assigned by content position"
+
+    def test_index_items_carry_artifact_links(self, tmp_path):
+        f = self._session(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        index = (out / "index.html").read_text(encoding="utf-8")
+        assert 'class="index-artifacts"' in index
+        assert "index-artifact-plan" in index
+        # Artifacts sit OUTSIDE the item's wrapping <a> (no nested anchors):
+        seg_start = index.find('class="index-item-number">#5')
+        seg = index[seg_start : seg_start + 4000]
+        assert seg.index("</a>") < seg.index("index-artifacts")
+
+    def test_index_artifact_targets_exist_in_pages(self, tmp_path):
+        """Integration drift guard: every index artifact href resolves to a
+        real element id in the page file it points at."""
+        import re as _re
+
+        f = self._session(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        index = (out / "index.html").read_text(encoding="utf-8")
+        hrefs = _re.findall(
+            r'class="index-artifact[^"]*" href="(page-\d+\.html)#([\w.:-]+)"', index
+        )
+        assert hrefs, "expected artifact links on the index"
+        for page_file, anchor in hrefs:
+            page_html = (out / page_file).read_text(encoding="utf-8")
+            assert f'id="{anchor}"' in page_html, (page_file, anchor)
+
+    def test_card_js_has_tree_api(self, tmp_path):
+        f = self._session(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        page = (out / "page-001.html").read_text(encoding="utf-8")
+        assert "addArtifact" in page
+        for artifact_type in ("insight", "thinking", "plan", "completion"):
+            assert artifact_type in page  # JS icon map covers the closed set
+
+    def test_web_session_data_gets_artifacts_too(self, tmp_path):
+        from claude_code_transcripts import generate_html_from_session_data
+
+        session_data = {
+            "title": "Web one",
+            "loglines": [
+                {
+                    "type": "user",
+                    "timestamp": "2025-01-01T10:00:00.000Z",
+                    "message": {"role": "user", "content": "hi"},
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2025-01-01T10:00:30.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "the reply"}],
+                    },
+                },
+            ],
+        }
+        out = tmp_path / "out"
+        generate_html_from_session_data(session_data, out)
+        prompts = self._card_data((out / "index.html").read_text(encoding="utf-8"))[
+            "prompts"
+        ]
+        assert [a["type"] for a in prompts[0]["artifacts"]] == ["completion"]
 
 
 class TestLocalSessionCLI:

@@ -219,6 +219,73 @@ class TestScanSessionMetadata:
         assert meta.ai_title == "Name"
 
 
+class TestTitleChanges:
+    """ai-title lines carry no timestamp, so changes are anchored to the
+    latest user-line timestamp seen at the moment the change was read; the
+    chapter divider goes before the first prompt AFTER that anchor."""
+
+    def _title(self, t):
+        return {"type": "ai-title", "aiTitle": t, "sessionId": "s"}
+
+    def _user_at(self, text, ts):
+        obj = _user(text)
+        obj["timestamp"] = ts
+        return obj
+
+    def test_stable_title_no_changes(self, tmp_path):
+        """Real sessions repeat the SAME title dozens of times (43 observed
+        in one file) — repeats are not changes."""
+        f = tmp_path / "s.jsonl"
+        entries = [_user("start the work")]
+        entries += [self._title("One stable name")] * 43
+        _write_jsonl(f, entries)
+        meta = scan_session_metadata(f)
+        assert meta.title_changes == ()
+        assert meta.ai_title == "One stable name"
+
+    def test_change_anchored_to_latest_user_timestamp(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        _write_jsonl(
+            f,
+            [
+                self._user_at("first prompt", "T1"),
+                self._title("Name A"),
+                self._user_at("second prompt", "T2"),
+                self._title("Name B"),
+            ],
+        )
+        assert scan_session_metadata(f).title_changes == (("T2", "Name B"),)
+
+    def test_consecutive_duplicates_deduped_distinct_rerecorded(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        _write_jsonl(
+            f,
+            [
+                self._user_at("p1", "T1"),
+                self._title("A"),
+                self._title("A"),
+                self._title("B"),
+                self._title("B"),
+                self._title("A"),
+            ],
+        )
+        assert scan_session_metadata(f).title_changes == (("T1", "B"), ("T1", "A"))
+
+    def test_change_before_any_user_anchors_empty(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        _write_jsonl(f, [self._title("A"), self._title("B"), _user("hi")])
+        assert scan_session_metadata(f).title_changes == (("", "B"),)
+
+    def test_chapter_titles_truncated(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        _write_jsonl(
+            f, [self._user_at("p", "T1"), self._title("A"), self._title("X" * 300)]
+        )
+        meta = scan_session_metadata(f, max_length=40)
+        ((_, title),) = meta.title_changes
+        assert len(title) <= 40
+
+
 def _away_summary(content, ts="2026-06-10T13:53:32.990Z"):
     """One away_summary system entry — Claude Code's "※ recap:" text.
 
