@@ -1564,6 +1564,57 @@ def render_logline(entry):
     return fragment
 
 
+def prompt_preview(text):
+    """Collapse whitespace and cap at 100 chars — the canonical prompt preview
+    shared by the live TOC, the static index, and the session card, so all
+    three render identical previews for the same prompt."""
+    preview = " ".join(text.split())
+    if len(preview) > 100:
+        preview = preview[:97] + "..."
+    return preview
+
+
+def compute_usage_totals(loglines):
+    """Token totals for the session info card.
+
+    ``context_tokens``: input + cache_creation + cache_read of the LATEST
+    assistant entry carrying ``message.usage`` (≈ the conversation's current
+    context size), or None when no usage was recorded (web JSON exports).
+    ``output_tokens``: sum across all assistant entries. Absolute numbers
+    only — the model's context *limit* is not recorded in session files.
+    """
+    context = None
+    output = 0
+    for entry in loglines:
+        if entry.get("type") != "assistant":
+            continue
+        usage = entry.get("message", {}).get("usage")
+        if not isinstance(usage, dict):
+            continue
+        output += usage.get("output_tokens", 0) or 0
+        context = (
+            (usage.get("input_tokens", 0) or 0)
+            + (usage.get("cache_creation_input_tokens", 0) or 0)
+            + (usage.get("cache_read_input_tokens", 0) or 0)
+        )
+    return {"context_tokens": context, "output_tokens": output}
+
+
+def last_assistant_snippet(loglines, max_length=280):
+    """Whitespace-collapsed text of the last assistant text block, or None.
+
+    The session card's recap fallback for sessions with no away-summary yet.
+    """
+    for entry in reversed(loglines):
+        if entry.get("type") != "assistant":
+            continue
+        text = extract_text_from_content(entry.get("message", {}).get("content", ""))
+        if not text:
+            continue
+        return _truncate(" ".join(text.split()), max_length)
+    return None
+
+
 def index_prompt(entry):
     """If `entry` is a real user prompt (for the live TOC), return (True, preview);
     otherwise (False, "").
@@ -1576,10 +1627,7 @@ def index_prompt(entry):
     text = extract_text_from_content(entry.get("message", {}).get("content", ""))
     if not text or text.startswith("Stop hook feedback:"):
         return False, ""
-    preview = " ".join(text.split())
-    if len(preview) > 100:
-        preview = preview[:97] + "..."
-    return True, preview
+    return True, prompt_preview(text)
 
 
 def new_live_stats():

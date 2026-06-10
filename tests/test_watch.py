@@ -21,6 +21,9 @@ from claude_code_transcripts import (
     live_stats_payload,
     resolve_active_session,
     create_live_server,
+    compute_usage_totals,
+    last_assistant_snippet,
+    prompt_preview,
     cli,
 )
 
@@ -513,6 +516,131 @@ class TestLiveStats:
             "tool_calls": 2,
             "commits": 1,
         }
+
+
+class TestCardDataHelpers:
+    """Pure helpers feeding the session info card (static embed + live SSE).
+
+    Usage shape verified against real ~/.claude/projects files (Claude Code
+    v2.1.x, 2026-06-10): message.usage = {"input_tokens": ..,
+    "cache_creation_input_tokens": .., "cache_read_input_tokens": ..,
+    "output_tokens": .., ...}. Context size = the three input-side numbers of
+    the LATEST assistant entry; output accumulates.
+    """
+
+    def _assistant(self, text="ok", usage=None, ts="T"):
+        msg = {"role": "assistant", "content": [{"type": "text", "text": text}]}
+        if usage is not None:
+            msg["usage"] = usage
+        return {"type": "assistant", "timestamp": ts, "message": msg}
+
+    def _user(self, text="hi", ts="T"):
+        return {
+            "type": "user",
+            "timestamp": ts,
+            "message": {"role": "user", "content": text},
+        }
+
+    def test_usage_latest_context_summed_output(self):
+        loglines = [
+            self._user(),
+            self._assistant(
+                usage={
+                    "input_tokens": 2052,
+                    "cache_creation_input_tokens": 41004,
+                    "cache_read_input_tokens": 0,
+                    "output_tokens": 1360,
+                }
+            ),
+            self._assistant(
+                usage={
+                    "input_tokens": 31,
+                    "cache_creation_input_tokens": 1145,
+                    "cache_read_input_tokens": 312625,
+                    "output_tokens": 116,
+                }
+            ),
+        ]
+        assert compute_usage_totals(loglines) == {
+            "context_tokens": 31 + 1145 + 312625,
+            "output_tokens": 1360 + 116,
+        }
+
+    def test_usage_none_when_no_usage(self):
+        """Web JSON exports carry no usage — the card hides the section."""
+        loglines = [self._user(), self._assistant()]
+        assert compute_usage_totals(loglines) == {
+            "context_tokens": None,
+            "output_tokens": 0,
+        }
+
+    def test_usage_trailing_entry_without_usage_keeps_context(self):
+        loglines = [
+            self._assistant(
+                usage={
+                    "input_tokens": 1,
+                    "cache_creation_input_tokens": 2,
+                    "cache_read_input_tokens": 3,
+                    "output_tokens": 4,
+                }
+            ),
+            self._assistant(),
+        ]
+        totals = compute_usage_totals(loglines)
+        assert totals["context_tokens"] == 6
+        assert totals["output_tokens"] == 4
+
+    def test_usage_missing_fields_default_zero(self):
+        loglines = [self._assistant(usage={"output_tokens": 5})]
+        assert compute_usage_totals(loglines) == {
+            "context_tokens": 0,
+            "output_tokens": 5,
+        }
+
+    def test_snippet_last_text_block(self):
+        loglines = [
+            self._user(),
+            self._assistant(text="first reply"),
+            self._user(),
+            self._assistant(text="final reply"),
+        ]
+        assert last_assistant_snippet(loglines) == "final reply"
+
+    def test_snippet_skips_tool_only_assistant(self):
+        tool_only = {
+            "type": "assistant",
+            "timestamp": "T",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "Bash", "input": {}, "id": "t1"}
+                ],
+            },
+        }
+        loglines = [self._assistant(text="real text"), tool_only]
+        assert last_assistant_snippet(loglines) == "real text"
+
+    def test_snippet_collapses_whitespace_and_truncates(self):
+        text = "line one\n\nline two   spaced " + "x" * 400
+        loglines = [self._assistant(text=text)]
+        s = last_assistant_snippet(loglines, max_length=50)
+        assert len(s) <= 50
+        assert "\n" not in s
+        assert s.startswith("line one line two spaced")
+        assert s.endswith("...")
+
+    def test_snippet_none_when_no_assistant_text(self):
+        assert last_assistant_snippet([self._user()]) is None
+
+    def test_prompt_preview_collapses_and_caps(self):
+        text = "a  b\nc " + "y" * 200
+        p = prompt_preview(text)
+        assert p.startswith("a b c")
+        assert len(p) == 100
+        assert p.endswith("...")
+
+    def test_prompt_preview_short_text_unchanged(self):
+        assert prompt_preview("fix the bug") == "fix the bug"
 
 
 class TestResolveActiveSession:
