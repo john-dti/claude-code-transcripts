@@ -13,11 +13,13 @@ session picker and the HTML archive listing. The behaviors under test:
 """
 
 import json
+from pathlib import Path
 
 from claude_code_transcripts import (
     scan_session_metadata,
     SessionMetadata,
     format_session_choice,
+    build_session_choices,
 )
 
 
@@ -226,3 +228,64 @@ class TestFormatSessionChoice:
         row = format_session_choice(meta, _MTIME, 1024, "proj", summary_width=44)
         assert "..." in row
         assert "x" * 200 not in row
+
+
+def _make_session(projects_dir, project_folder, name, entries):
+    """Write one session JSONL under a Claude-style encoded project folder."""
+    proj = projects_dir / project_folder
+    proj.mkdir(parents=True, exist_ok=True)
+    f = proj / name
+    _write_jsonl(f, entries)
+    return f
+
+
+class TestBuildSessionChoices:
+    """Tests for build_session_choices — the shared local/watch picker rows.
+
+    Both the `local` and `watch --pick` pickers must render identical rows
+    (date · size · [branch] · project · command · summary), built from ONE
+    metadata scan per file.
+    """
+
+    def test_choice_rows_use_shared_format(self, tmp_path):
+        f = _make_session(
+            tmp_path,
+            "D--projects-devjig",
+            "abc.jsonl",
+            [_user(_command("/plan", "build the widget"), branch="dti/x")],
+        )
+        choices = build_session_choices(tmp_path)
+        assert len(choices) == 1
+        assert choices[0].value == f
+        row = choices[0].title
+        assert "[dti/x]" in row
+        assert "devjig" in row  # decoded project display name
+        assert "/plan" in row
+        assert "build the widget" in row
+
+    def test_scans_each_file_once(self, tmp_path, monkeypatch):
+        """The old local picker scanned every file twice (find + per-row)."""
+        import claude_code_transcripts as cct
+
+        for i in range(2):
+            _make_session(tmp_path, "proj", f"s{i}.jsonl", [_user(f"prompt {i}")])
+
+        calls = []
+        real = cct.scan_session_metadata
+
+        def counting(path, *args, **kwargs):
+            calls.append(Path(path))
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(cct, "scan_session_metadata", counting)
+        cct.build_session_choices(tmp_path)
+        assert len(calls) == 2
+
+    def test_respects_limit(self, tmp_path):
+        for i in range(5):
+            _make_session(tmp_path, "proj", f"s{i}.jsonl", [_user(f"prompt {i}")])
+        assert len(build_session_choices(tmp_path, limit=3)) == 3
+
+    def test_empty_folder_returns_empty_list(self, tmp_path):
+        assert build_session_choices(tmp_path) == []
+        assert build_session_choices(tmp_path / "missing") == []

@@ -29,6 +29,7 @@ from claude_code_transcripts import (
     parse_session_file,
     get_session_summary,
     scan_session_metadata,
+    SessionMetadata,
     find_local_sessions,
 )
 
@@ -1399,7 +1400,10 @@ class TestFindLocalSessions:
         results = find_local_sessions(tmp_path / ".claude" / "projects", limit=10)
         assert len(results) == 1
         assert results[0][0] == session_file
-        assert results[0][1] == "Test session"
+        # One scan per file: the tuple carries the full metadata, not just a
+        # summary string, so pickers don't have to re-scan for branch/command.
+        assert isinstance(results[0][1], SessionMetadata)
+        assert results[0][1].summary == "Test session"
 
     def test_excludes_agent_files(self, tmp_path):
         """Test that agent- prefixed files are excluded."""
@@ -1439,7 +1443,7 @@ class TestFindLocalSessions:
 
         results = find_local_sessions(tmp_path / ".claude" / "projects", limit=10)
         assert len(results) == 1
-        assert results[0][1] == "Real session"
+        assert results[0][1].summary == "Real session"
 
     def test_sorts_by_modification_time(self, tmp_path):
         """Test that results are sorted by modification time, newest first."""
@@ -1463,8 +1467,8 @@ class TestFindLocalSessions:
 
         results = find_local_sessions(tmp_path / ".claude" / "projects", limit=10)
         assert len(results) == 2
-        assert results[0][1] == "Newer"  # Most recent first
-        assert results[1][1] == "Older"
+        assert results[0][1].summary == "Newer"  # Most recent first
+        assert results[1][1].summary == "Older"
 
     def test_respects_limit(self, tmp_path):
         """Test that limit parameter is respected."""

@@ -294,6 +294,23 @@ def format_session_choice(meta, mtime, size_bytes, project, summary_width=44):
     return f"{date_str}  {size_kb:5.0f} KB  {branch:<20} {proj:<28} {cmd:<16} {summary}".rstrip()
 
 
+def build_session_choices(folder, limit=10):
+    """Scan recent sessions once and build aligned questionary Choices.
+
+    Shared by the `local` and `watch --pick` pickers so both render identical
+    rows (see format_session_choice). find_local_sessions already extracted
+    everything a row needs — one metadata scan per file. Each Choice.value is
+    the session Path.
+    """
+    choices = []
+    for filepath, meta in find_local_sessions(folder, limit=limit):
+        stat = filepath.stat()
+        project = get_project_display_name(filepath.parent.name)
+        display = format_session_choice(meta, stat.st_mtime, stat.st_size, project)
+        choices.append(questionary.Choice(title=display, value=filepath))
+    return choices
+
+
 # Module-level variable for GitHub repo (set by generate_html)
 _github_repo = None
 
@@ -331,8 +348,10 @@ def get_session_summary(filepath, max_length=200):
 def find_local_sessions(folder, limit=10):
     """Find recent JSONL session files in the given folder.
 
-    Returns a list of (Path, summary) tuples sorted by modification time.
-    Excludes agent files and warmup/empty sessions.
+    Returns a list of (Path, SessionMetadata) tuples sorted by modification
+    time. Excludes agent files and warmup/empty sessions. Carrying the full
+    metadata (not just the summary string) lets pickers render branch/project/
+    command columns without re-scanning every file.
     """
     folder = Path(folder)
     if not folder.exists():
@@ -342,11 +361,11 @@ def find_local_sessions(folder, limit=10):
     for f in folder.glob("**/*.jsonl"):
         if f.name.startswith("agent-"):
             continue
-        summary = get_session_summary(f)
+        meta = scan_session_metadata(f)
         # Skip boring/empty sessions
-        if summary.lower() == "warmup" or summary == "(no summary)":
+        if meta.summary.lower() == "warmup" or meta.summary == "(no summary)":
             continue
-        results.append((f, summary))
+        results.append((f, meta))
 
     # Sort by modification time, most recent first
     results.sort(key=lambda x: x[0].stat().st_mtime, reverse=True)
@@ -2470,20 +2489,11 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
         return
 
     click.echo("Loading local sessions...")
-    results = find_local_sessions(projects_folder, limit=limit)
+    choices = build_session_choices(projects_folder, limit=limit)
 
-    if not results:
+    if not choices:
         click.echo("No local sessions found.")
         return
-
-    # Build choices for questionary
-    choices = []
-    for filepath, summary in results:
-        stat = filepath.stat()
-        meta = scan_session_metadata(filepath)
-        project = get_project_display_name(filepath.parent.name)
-        display = format_session_choice(meta, stat.st_mtime, stat.st_size, project)
-        choices.append(questionary.Choice(title=display, value=filepath))
 
     selected = questionary.select(
         "Select a session to convert:",
@@ -2585,11 +2595,12 @@ def watch_cmd(session, pick, source, port, repo, open_browser, poll_interval):
             click.echo("No local sessions found.")
             return
         choices = []
-        for filepath, summary in results:
+        for filepath, meta in results:
             stat = filepath.stat()
             mod_time = datetime.fromtimestamp(stat.st_mtime)
             size_kb = stat.st_size / 1024
             date_str = mod_time.strftime("%Y-%m-%d %H:%M")
+            summary = meta.summary
             if len(summary) > 50:
                 summary = summary[:47] + "..."
             display = f"{date_str}  {size_kb:5.0f} KB  {summary}"
