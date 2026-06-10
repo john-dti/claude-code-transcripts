@@ -61,6 +61,8 @@ The generated output includes:
 - `index.html` - an index page with a timeline of prompts and commits
 - `page-001.html`, `page-002.html`, etc. - paginated transcript pages
 
+Pages are titled with the session's name — Claude Code's auto-generated title when available (the same name `claude --resume` shows), otherwise the first real prompt — so browser tabs stay identifiable with several transcripts open.
+
 ### Local sessions
 
 Local Claude Code sessions are stored as JSONL files in `~/.claude/projects`. Run with no arguments to select from recent sessions:

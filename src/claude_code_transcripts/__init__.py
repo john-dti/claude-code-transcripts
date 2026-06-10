@@ -366,6 +366,24 @@ def get_session_summary(filepath, max_length=200):
         return "(no summary)"
 
 
+def get_session_title(filepath, max_length=80):
+    """Best display name for a session file, or None when nothing usable.
+
+    JSONL: the last aiTitle, else the summary heuristic. JSON: the first user
+    message. "(no summary)" maps to None so callers fall back to the generic
+    page title. Shorter default truncation than the picker — this feeds
+    browser-tab titles.
+    """
+    filepath = Path(filepath)
+    if filepath.suffix == ".jsonl":
+        title = scan_session_metadata(filepath, max_length=max_length).title
+    else:
+        title = get_session_summary(filepath, max_length=max_length)
+    if not title or title == "(no summary)":
+        return None
+    return title
+
+
 def find_local_sessions(folder, limit=10):
     """Find recent JSONL session files in the given folder.
 
@@ -524,6 +542,7 @@ def find_all_sessions(folder, include_agents=False):
             {
                 "path": session_file,
                 "summary": meta.summary,
+                "title": meta.title,
                 "branch": meta.branch,
                 "command": meta.command,
                 "mtime": stat.st_mtime,
@@ -697,7 +716,9 @@ def generate_batch_html(
 
             # Generate transcript HTML with error handling
             try:
-                generate_html(session["path"], session_dir)
+                # Title from the scan find_all_sessions already did — avoids a
+                # second metadata pass per archived session.
+                generate_html(session["path"], session_dir, title=session.get("title"))
                 successful_sessions += 1
                 # Record the mtime we actually rendered against, not a re-stat
                 # — if the source kept growing during conversion, the next run
@@ -2279,9 +2300,12 @@ def generate_index_pagination_html(total_pages):
     return _macros.index_pagination(total_pages)
 
 
-def generate_html(json_path, output_dir, github_repo=None):
+def generate_html(json_path, output_dir, github_repo=None, title=None):
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
+
+    if title is None:
+        title = get_session_title(json_path)
 
     # Load session file (supports both JSON and JSONL)
     data = parse_session_file(json_path)
@@ -2358,6 +2382,7 @@ def generate_html(json_path, output_dir, github_repo=None):
         page_content = page_template.render(
             css=CSS,
             js=JS,
+            session_title=title,
             page_num=page_num,
             total_pages=total_pages,
             pagination_html=pagination_html,
@@ -2439,6 +2464,7 @@ def generate_html(json_path, output_dir, github_repo=None):
     index_content = index_template.render(
         css=CSS,
         js=JS,
+        session_title=title,
         pagination_html=index_pagination,
         prompt_num=prompt_num,
         total_messages=total_messages,
@@ -2841,6 +2867,9 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
 
+    # Web sessions carry their own display title.
+    title = session_data.get("title")
+
     loglines = session_data.get("loglines", [])
 
     # Auto-detect GitHub repo if not provided
@@ -2909,6 +2938,7 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
         page_content = page_template.render(
             css=CSS,
             js=JS,
+            session_title=title,
             page_num=page_num,
             total_pages=total_pages,
             pagination_html=pagination_html,
@@ -2990,6 +3020,7 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
     index_content = index_template.render(
         css=CSS,
         js=JS,
+        session_title=title,
         pagination_html=index_pagination,
         prompt_num=prompt_num,
         total_messages=total_messages,

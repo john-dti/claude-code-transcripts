@@ -1486,6 +1486,143 @@ class TestFindLocalSessions:
         assert len(results) == 3
 
 
+class TestSessionTitles:
+    """Static pages are titled with the session's name (Claude Code's
+    auto-title when present, else the summary heuristic) so browser tabs stay
+    identifiable when several transcripts are open."""
+
+    def _session_with_ai_title(self, tmp_path, title="Fix the flux capacitor"):
+        f = tmp_path / "s.jsonl"
+        lines = [
+            {"type": "ai-title", "aiTitle": title, "sessionId": "x"},
+            {
+                "type": "user",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "message": {"role": "user", "content": "Hello there"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-01T00:00:05Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Hi"}],
+                },
+            },
+        ]
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        return f
+
+    def test_page_title_and_h1_use_session_name(self, tmp_path):
+        f = self._session_with_ai_title(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        page = (out / "page-001.html").read_text(encoding="utf-8")
+        assert (
+            "<title>Fix the flux capacitor · page 1 · Claude Code transcript</title>"
+            in page
+        )
+        h1 = page.split("<h1")[1].split("</h1>")[0]
+        assert "Fix the flux capacitor" in h1
+        assert "page 1/1" in h1
+
+    def test_index_title_uses_session_name(self, tmp_path):
+        f = self._session_with_ai_title(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        index = (out / "index.html").read_text(encoding="utf-8")
+        assert "<title>Fix the flux capacitor · Claude Code transcript</title>" in index
+        assert "Fix the flux capacitor" in index.split("<h1")[1].split("</h1>")[0]
+
+    def test_summary_fallback_when_no_ai_title(self, tmp_path):
+        """Without an ai-title the prompt-derived summary becomes the name."""
+        f = tmp_path / "s.jsonl"
+        lines = [
+            {
+                "type": "user",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "message": {"role": "user", "content": "Refactor the widget loader"},
+            },
+        ]
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        out = tmp_path / "out"
+        generate_html(f, out)
+        index = (out / "index.html").read_text(encoding="utf-8")
+        assert "Refactor the widget loader · Claude Code transcript" in index
+
+    def test_generic_title_without_name(self, tmp_path):
+        """A session with no usable name keeps the old generic titles."""
+        f = tmp_path / "s.jsonl"
+        # Assistant-only content yields "(no summary)" -> no usable name.
+        lines = [
+            {
+                "type": "assistant",
+                "timestamp": "2025-01-01T00:00:05Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Hi"}],
+                },
+            },
+        ]
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        out = tmp_path / "out"
+        generate_html(f, out)
+        index = (out / "index.html").read_text(encoding="utf-8")
+        assert "<title>Claude Code transcript - Index</title>" in index
+
+    def test_explicit_title_param_wins(self, tmp_path):
+        f = self._session_with_ai_title(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out, title="Override name")
+        index = (out / "index.html").read_text(encoding="utf-8")
+        assert "<title>Override name · Claude Code transcript</title>" in index
+
+    def test_web_session_data_title_threads_through(self, tmp_path):
+        from claude_code_transcripts import generate_html_from_session_data
+
+        session_data = {
+            "title": "Web session name",
+            "loglines": [
+                {
+                    "type": "user",
+                    "timestamp": "2025-01-01T00:00:00Z",
+                    "message": {"role": "user", "content": "Hello"},
+                }
+            ],
+        }
+        out = tmp_path / "out"
+        generate_html_from_session_data(session_data, out)
+        index = (out / "index.html").read_text(encoding="utf-8")
+        assert "<title>Web session name · Claude Code transcript</title>" in index
+
+    def test_title_is_escaped(self, tmp_path):
+        f = self._session_with_ai_title(
+            tmp_path, title="Hack <script>alert(1)</script>"
+        )
+        out = tmp_path / "out"
+        generate_html(f, out)
+        index = (out / "index.html").read_text(encoding="utf-8")
+        assert "<script>alert(1)</script>" not in index
+        assert "&lt;script&gt;" in index
+
+    def test_batch_archive_threads_titles(self, tmp_path):
+        from claude_code_transcripts import generate_batch_html
+
+        projects = tmp_path / "projects" / "D--projects-devjig"
+        projects.mkdir(parents=True)
+        self._session_with_ai_title(projects)  # writes s.jsonl inside
+        out = tmp_path / "archive"
+        generate_batch_html(tmp_path / "projects", out)
+        session_index = out / "devjig" / "s" / "index.html"
+        content = session_index.read_text(encoding="utf-8")
+        assert "Fix the flux capacitor · Claude Code transcript" in content
+
+
 class TestLocalSessionCLI:
     """Tests for CLI behavior with local sessions."""
 
