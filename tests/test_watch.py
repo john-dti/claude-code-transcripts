@@ -21,6 +21,9 @@ from claude_code_transcripts import (
     live_stats_payload,
     resolve_active_session,
     create_live_server,
+    compute_usage_totals,
+    last_assistant_snippet,
+    prompt_preview,
     cli,
 )
 
@@ -42,6 +45,30 @@ def _ai_title_line(title):
     2026-06-10): {"type":"ai-title","aiTitle":"...","sessionId":"..."}
     """
     obj = {"type": "ai-title", "aiTitle": title, "sessionId": "s"}
+    return (json.dumps(obj) + "\n").encode("utf-8")
+
+
+def _assistant_line(text, usage=None, ts="T"):
+    """One JSONL assistant line, optionally carrying message.usage."""
+    msg = {"role": "assistant", "content": [{"type": "text", "text": text}]}
+    if usage:
+        msg["usage"] = usage
+    obj = {"type": "assistant", "timestamp": ts, "message": msg}
+    return (json.dumps(obj) + "\n").encode("utf-8")
+
+
+def _away_summary_line(content, ts="T"):
+    """One away_summary system line — Claude Code's persisted recap.
+
+    Shape verified against real ~/.claude/projects files (v2.1.x, 2026-06-10).
+    """
+    obj = {
+        "type": "system",
+        "subtype": "away_summary",
+        "content": content,
+        "isMeta": False,
+        "timestamp": ts,
+    }
     return (json.dumps(obj) + "\n").encode("utf-8")
 
 
@@ -166,6 +193,36 @@ class TestNormalizeJsonlObj:
 
     def test_system_dropped_even_with_include_meta(self):
         obj = {"type": "system", "subtype": "turn_duration", "timestamp": "T"}
+        assert _normalize_jsonl_obj(obj, include_meta=True) is None
+
+    def test_away_summary_dropped_by_default(self):
+        obj = {
+            "type": "system",
+            "subtype": "away_summary",
+            "content": "Recap.",
+            "isMeta": False,
+            "timestamp": "T",
+        }
+        assert _normalize_jsonl_obj(obj) is None
+
+    def test_away_summary_with_include_meta(self):
+        """Shape verified against real ~/.claude/projects files (v2.1.x):
+        {"type":"system","subtype":"away_summary","content":"...",...}"""
+        obj = {
+            "type": "system",
+            "subtype": "away_summary",
+            "content": "All green. (disable recaps in /config)",
+            "isMeta": False,
+            "timestamp": "T9",
+        }
+        assert _normalize_jsonl_obj(obj, include_meta=True) == {
+            "type": "away-summary",
+            "text": "All green.",
+            "timestamp": "T9",
+        }
+
+    def test_away_summary_without_content_dropped(self):
+        obj = {"type": "system", "subtype": "away_summary", "timestamp": "T"}
         assert _normalize_jsonl_obj(obj, include_meta=True) is None
 
 
@@ -480,6 +537,12 @@ class TestLiveStats:
                         },
                         {"type": "tool_use", "id": "b", "name": "Edit", "input": {}},
                     ],
+                    "usage": {
+                        "input_tokens": 10,
+                        "cache_creation_input_tokens": 20,
+                        "cache_read_input_tokens": 30,
+                        "output_tokens": 40,
+                    },
                 },
             },
             {
@@ -512,7 +575,176 @@ class TestLiveStats:
             "messages": 4,
             "tool_calls": 2,
             "commits": 1,
+            "context_tokens": 60,
+            "output_tokens": 40,
         }
+
+    def test_token_fields_track_latest_context_and_sum_output(self):
+        def assistant(usage, ts):
+            return {
+                "type": "assistant",
+                "timestamp": ts,
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "reply"}],
+                    "usage": usage,
+                },
+            }
+
+        state = new_live_stats()
+        accumulate_live_stats(
+            state,
+            assistant(
+                {
+                    "input_tokens": 1,
+                    "cache_creation_input_tokens": 2,
+                    "cache_read_input_tokens": 3,
+                    "output_tokens": 10,
+                },
+                "T1",
+            ),
+        )
+        assert live_stats_payload(state)["context_tokens"] == 6
+        accumulate_live_stats(
+            state,
+            assistant(
+                {
+                    "input_tokens": 100,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 200,
+                    "output_tokens": 5,
+                },
+                "T2",
+            ),
+        )
+        payload = live_stats_payload(state)
+        assert payload["context_tokens"] == 300  # latest wins, not summed
+        assert payload["output_tokens"] == 15  # summed
+
+
+class TestCardDataHelpers:
+    """Pure helpers feeding the session info card (static embed + live SSE).
+
+    Usage shape verified against real ~/.claude/projects files (Claude Code
+    v2.1.x, 2026-06-10): message.usage = {"input_tokens": ..,
+    "cache_creation_input_tokens": .., "cache_read_input_tokens": ..,
+    "output_tokens": .., ...}. Context size = the three input-side numbers of
+    the LATEST assistant entry; output accumulates.
+    """
+
+    def _assistant(self, text="ok", usage=None, ts="T"):
+        msg = {"role": "assistant", "content": [{"type": "text", "text": text}]}
+        if usage is not None:
+            msg["usage"] = usage
+        return {"type": "assistant", "timestamp": ts, "message": msg}
+
+    def _user(self, text="hi", ts="T"):
+        return {
+            "type": "user",
+            "timestamp": ts,
+            "message": {"role": "user", "content": text},
+        }
+
+    def test_usage_latest_context_summed_output(self):
+        loglines = [
+            self._user(),
+            self._assistant(
+                usage={
+                    "input_tokens": 2052,
+                    "cache_creation_input_tokens": 41004,
+                    "cache_read_input_tokens": 0,
+                    "output_tokens": 1360,
+                }
+            ),
+            self._assistant(
+                usage={
+                    "input_tokens": 31,
+                    "cache_creation_input_tokens": 1145,
+                    "cache_read_input_tokens": 312625,
+                    "output_tokens": 116,
+                }
+            ),
+        ]
+        assert compute_usage_totals(loglines) == {
+            "context_tokens": 31 + 1145 + 312625,
+            "output_tokens": 1360 + 116,
+        }
+
+    def test_usage_none_when_no_usage(self):
+        """Web JSON exports carry no usage — the card hides the section."""
+        loglines = [self._user(), self._assistant()]
+        assert compute_usage_totals(loglines) == {
+            "context_tokens": None,
+            "output_tokens": 0,
+        }
+
+    def test_usage_trailing_entry_without_usage_keeps_context(self):
+        loglines = [
+            self._assistant(
+                usage={
+                    "input_tokens": 1,
+                    "cache_creation_input_tokens": 2,
+                    "cache_read_input_tokens": 3,
+                    "output_tokens": 4,
+                }
+            ),
+            self._assistant(),
+        ]
+        totals = compute_usage_totals(loglines)
+        assert totals["context_tokens"] == 6
+        assert totals["output_tokens"] == 4
+
+    def test_usage_missing_fields_default_zero(self):
+        loglines = [self._assistant(usage={"output_tokens": 5})]
+        assert compute_usage_totals(loglines) == {
+            "context_tokens": 0,
+            "output_tokens": 5,
+        }
+
+    def test_snippet_last_text_block(self):
+        loglines = [
+            self._user(),
+            self._assistant(text="first reply"),
+            self._user(),
+            self._assistant(text="final reply"),
+        ]
+        assert last_assistant_snippet(loglines) == "final reply"
+
+    def test_snippet_skips_tool_only_assistant(self):
+        tool_only = {
+            "type": "assistant",
+            "timestamp": "T",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "Bash", "input": {}, "id": "t1"}
+                ],
+            },
+        }
+        loglines = [self._assistant(text="real text"), tool_only]
+        assert last_assistant_snippet(loglines) == "real text"
+
+    def test_snippet_collapses_whitespace_and_truncates(self):
+        text = "line one\n\nline two   spaced " + "x" * 400
+        loglines = [self._assistant(text=text)]
+        s = last_assistant_snippet(loglines, max_length=50)
+        assert len(s) <= 50
+        assert "\n" not in s
+        assert s.startswith("line one line two spaced")
+        assert s.endswith("...")
+
+    def test_snippet_none_when_no_assistant_text(self):
+        assert last_assistant_snippet([self._user()]) is None
+
+    def test_prompt_preview_collapses_and_caps(self):
+        text = "a  b\nc " + "y" * 200
+        p = prompt_preview(text)
+        assert p.startswith("a b c")
+        assert len(p) == 100
+        assert p.endswith("...")
+
+    def test_prompt_preview_short_text_unchanged(self):
+        assert prompt_preview("fix the bug") == "fix the bug"
 
 
 class TestResolveActiveSession:
@@ -717,6 +949,134 @@ class TestLiveServer:
                     ),
                 )
                 assert _data_for(fenced, "title") == []
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_card_shell_served(self, tmp_path):
+        """The live shell carries the session card mount and its JS API,
+        without losing the existing prompt TOC."""
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(_user_line("hello", "2025-01-01T10:00:00.000Z"))
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            body = httpx.get(f"http://127.0.0.1:{port}/", timeout=5).text
+            assert 'id="session-card"' in body
+            assert "sessionCard" in body  # CARD_JS wired in
+            assert 'id="toc-list"' in body  # existing TOC untouched
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_recap_event_streams_and_dedupes(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(
+            _user_line("first prompt", "2025-01-01T10:00:00.000Z")
+            + _away_summary_line("Initial recap. (disable recaps in /config)")
+        )
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                initial = _collect_sse(
+                    lines, lambda evs: any(ev == "recap" for ev, _ in evs)
+                )
+                # UI-hint suffix stripped on the wire
+                assert _data_for(initial, "recap") == [{"text": "Initial recap."}]
+
+                with open(p, "ab") as f:
+                    f.write(_away_summary_line("Updated recap."))
+                    f.flush()
+                    os.fsync(f.fileno())
+                more = _collect_sse(
+                    lines, lambda evs: any(ev == "recap" for ev, _ in evs)
+                )
+                assert _data_for(more, "recap") == [{"text": "Updated recap."}]
+
+                # Duplicate recap must not re-emit; user line = stats fence.
+                with open(p, "ab") as f:
+                    f.write(_away_summary_line("Updated recap."))
+                    f.write(_user_line("second prompt", "2025-01-01T10:05:00.000Z"))
+                    f.flush()
+                    os.fsync(f.fileno())
+                fenced = _collect_sse(
+                    lines,
+                    lambda evs: any(
+                        ev == "stats" and json.loads(d)["prompts"] == 2 for ev, d in evs
+                    ),
+                )
+                assert _data_for(fenced, "recap") == []
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_stats_event_carries_token_fields(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(
+            _user_line("first prompt", "2025-01-01T10:00:00.000Z")
+            + _assistant_line(
+                "reply one",
+                usage={
+                    "input_tokens": 10,
+                    "cache_creation_input_tokens": 5,
+                    "cache_read_input_tokens": 0,
+                    "output_tokens": 7,
+                },
+                ts="2025-01-01T10:00:30.000Z",
+            )
+        )
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                initial = _collect_sse(
+                    lines, lambda evs: any(ev == "stats" for ev, _ in evs)
+                )
+                payload = _data_for(initial, "stats")[-1]
+                assert payload["context_tokens"] == 15
+                assert payload["output_tokens"] == 7
+
+                with open(p, "ab") as f:
+                    f.write(
+                        _assistant_line(
+                            "reply two",
+                            usage={
+                                "input_tokens": 1,
+                                "cache_creation_input_tokens": 0,
+                                "cache_read_input_tokens": 100,
+                                "output_tokens": 3,
+                            },
+                            ts="2025-01-01T10:01:00.000Z",
+                        )
+                    )
+                    f.flush()
+                    os.fsync(f.fileno())
+                more = _collect_sse(
+                    lines,
+                    lambda evs: any(
+                        ev == "stats" and json.loads(d)["output_tokens"] == 10
+                        for ev, d in evs
+                    ),
+                )
+                payload = _data_for(more, "stats")[-1]
+                assert payload["context_tokens"] == 101  # latest, not summed
+                assert payload["output_tokens"] == 10  # summed
         finally:
             server.shutdown()
             server.server_close()

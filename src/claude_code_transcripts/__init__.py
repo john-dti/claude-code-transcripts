@@ -152,6 +152,16 @@ def _truncate(text, max_length):
     return text
 
 
+# Some away_summary contents end with a UI hint Claude Code appends to its
+# "※ recap:" display; strip it only as a trailer so mid-text mentions survive.
+_RECAP_SUFFIX_RE = re.compile(r"\s*\(disable recaps in /config\)\s*$", re.IGNORECASE)
+
+
+def strip_recap_suffix(text):
+    """Remove the trailing "(disable recaps in /config)" UI hint, if present."""
+    return _RECAP_SUFFIX_RE.sub("", text)
+
+
 def extract_command_summary(text):
     """Return a readable "name: args" summary for slash-command messages, else None.
 
@@ -179,6 +189,8 @@ class SessionMetadata:
     ai_title: Claude Code's evolving auto-generated session name (the LAST
         ``type=="ai-title"`` line), or None. This is the name `claude --resume`
         shows; independent of `summary` so picker rows keep the prompt text.
+    recap: the latest away-summary recap (Claude Code's "※ recap:" text), or
+        None. Untruncated — it feeds the session info card, not picker rows.
     """
 
     summary: str
@@ -186,6 +198,7 @@ class SessionMetadata:
     command: str | None
     from_control_fallback: bool
     ai_title: str | None = None
+    recap: str | None = None
 
     @property
     def title(self):
@@ -217,6 +230,7 @@ def scan_session_metadata(filepath, max_length=200):
     control_fallback = None  # (name, body) of the first skipped control command
     branch = None
     ai_title = None
+    recap = None
 
     try:
         with open(filepath, "r", encoding="utf-8") as f:
@@ -236,6 +250,15 @@ def scan_session_metadata(filepath, max_length=200):
                 # session evolves, so keep overwriting until EOF.
                 if obj.get("type") == "ai-title" and obj.get("aiTitle"):
                     ai_title = obj["aiTitle"]
+                    continue
+
+                # Latest away_summary = the session's current recap.
+                if (
+                    obj.get("type") == "system"
+                    and obj.get("subtype") == "away_summary"
+                    and obj.get("content")
+                ):
+                    recap = strip_recap_suffix(obj["content"]).strip()
                     continue
 
                 if (
@@ -291,6 +314,7 @@ def scan_session_metadata(filepath, max_length=200):
         command=chosen_command,
         from_control_fallback=from_control_fallback,
         ai_title=_truncate(ai_title, max_length) if ai_title else None,
+        recap=recap or None,
     )
 
 
@@ -543,6 +567,7 @@ def find_all_sessions(folder, include_agents=False):
                 "path": session_file,
                 "summary": meta.summary,
                 "title": meta.title,
+                "recap": meta.recap,
                 "branch": meta.branch,
                 "command": meta.command,
                 "mtime": stat.st_mtime,
@@ -716,9 +741,14 @@ def generate_batch_html(
 
             # Generate transcript HTML with error handling
             try:
-                # Title from the scan find_all_sessions already did — avoids a
-                # second metadata pass per archived session.
-                generate_html(session["path"], session_dir, title=session.get("title"))
+                # Title/recap from the scan find_all_sessions already did —
+                # avoids a second metadata pass per archived session.
+                generate_html(
+                    session["path"],
+                    session_dir,
+                    title=session.get("title"),
+                    recap=session.get("recap"),
+                )
                 successful_sessions += 1
                 # Record the mtime we actually rendered against, not a re-stat
                 # — if the source kept growing during conversion, the next run
@@ -863,13 +893,23 @@ def _normalize_jsonl_obj(obj, include_meta=False):
     With ``include_meta=True`` (the tail path only), additionally returns
     typed meta entries the live view reacts to but the static parser must
     never see: ``{"type": "ai-title", "title": ...}`` for session-name
-    changes. The default keeps the static contract byte-identical.
+    changes and ``{"type": "away-summary", "text": ..., "timestamp": ...}``
+    for recap updates. The default keeps the static contract byte-identical.
     """
     entry_type = obj.get("type")
 
     if include_meta and entry_type == "ai-title":
         if obj.get("aiTitle"):
             return {"type": "ai-title", "title": obj["aiTitle"]}
+        return None
+
+    if include_meta and entry_type == "system":
+        if obj.get("subtype") == "away_summary" and obj.get("content"):
+            return {
+                "type": "away-summary",
+                "text": strip_recap_suffix(obj["content"]).strip(),
+                "timestamp": obj.get("timestamp", ""),
+            }
         return None
 
     # Skip non-message entries
@@ -1540,6 +1580,97 @@ def render_logline(entry):
     return fragment
 
 
+def prompt_preview(text):
+    """Collapse whitespace and cap at 100 chars — the canonical prompt preview
+    shared by the live TOC, the static index, and the session card, so all
+    three render identical previews for the same prompt."""
+    preview = " ".join(text.split())
+    if len(preview) > 100:
+        preview = preview[:97] + "..."
+    return preview
+
+
+def compute_usage_totals(loglines):
+    """Token totals for the session info card.
+
+    ``context_tokens``: input + cache_creation + cache_read of the LATEST
+    assistant entry carrying ``message.usage`` (≈ the conversation's current
+    context size), or None when no usage was recorded (web JSON exports).
+    ``output_tokens``: sum across all assistant entries. Absolute numbers
+    only — the model's context *limit* is not recorded in session files.
+    """
+    context = None
+    output = 0
+    for entry in loglines:
+        if entry.get("type") != "assistant":
+            continue
+        usage = entry.get("message", {}).get("usage")
+        if not isinstance(usage, dict):
+            continue
+        output += usage.get("output_tokens", 0) or 0
+        context = (
+            (usage.get("input_tokens", 0) or 0)
+            + (usage.get("cache_creation_input_tokens", 0) or 0)
+            + (usage.get("cache_read_input_tokens", 0) or 0)
+        )
+    return {"context_tokens": context, "output_tokens": output}
+
+
+def last_assistant_snippet(loglines, max_length=280):
+    """Whitespace-collapsed text of the last assistant text block, or None.
+
+    The session card's recap fallback for sessions with no away-summary yet.
+    """
+    for entry in reversed(loglines):
+        if entry.get("type") != "assistant":
+            continue
+        text = extract_text_from_content(entry.get("message", {}).get("content", ""))
+        if not text:
+            continue
+        return _truncate(" ".join(text.split()), max_length)
+    return None
+
+
+def build_card_data(
+    title,
+    prompt_num,
+    total_messages,
+    total_tool_calls,
+    total_commits,
+    loglines,
+    recap,
+    card_prompts,
+    latest_link,
+):
+    """Assemble the session-card payload shared by both static generators.
+
+    Recap precedence: an explicit away-summary recap (source "recap"), else
+    the last assistant text snippet (source "assistant") so the card always
+    answers "where did this session leave off", else null. ``usage`` comes
+    from compute_usage_totals; ``context_tokens`` is null for web JSON
+    exports, which the card hides.
+    """
+    usage = compute_usage_totals(loglines)
+    if recap:
+        recap_obj = {"text": _truncate(recap, 400), "source": "recap"}
+    else:
+        snippet = last_assistant_snippet(loglines)
+        recap_obj = {"text": snippet, "source": "assistant"} if snippet else None
+    return {
+        "title": title,
+        "stats": {
+            "prompts": prompt_num,
+            "messages": total_messages,
+            "tool_calls": total_tool_calls,
+            "commits": total_commits,
+        },
+        "usage": usage,
+        "recap": recap_obj,
+        "prompts": card_prompts,
+        "latest_link": latest_link,
+    }
+
+
 def index_prompt(entry):
     """If `entry` is a real user prompt (for the live TOC), return (True, preview);
     otherwise (False, "").
@@ -1552,15 +1683,19 @@ def index_prompt(entry):
     text = extract_text_from_content(entry.get("message", {}).get("content", ""))
     if not text or text.startswith("Stop hook feedback:"):
         return False, ""
-    preview = " ".join(text.split())
-    if len(preview) > 100:
-        preview = preview[:97] + "..."
-    return True, preview
+    return True, prompt_preview(text)
 
 
 def new_live_stats():
     """Fresh cumulative-counter state for one SSE connection."""
-    return {"prompts": 0, "messages": 0, "tool_counts": {}, "commits": 0}
+    return {
+        "prompts": 0,
+        "messages": 0,
+        "tool_counts": {},
+        "commits": 0,
+        "context_tokens": None,
+        "output_tokens": 0,
+    }
 
 
 def accumulate_live_stats(state, entry):
@@ -1585,6 +1720,17 @@ def accumulate_live_stats(state, entry):
     is_prompt, _ = index_prompt(entry)
     if is_prompt:
         state["prompts"] += 1
+    if entry.get("type") == "assistant":
+        usage = entry.get("message", {}).get("usage")
+        if isinstance(usage, dict):
+            # Same semantics as compute_usage_totals: latest context, summed
+            # output.
+            state["output_tokens"] += usage.get("output_tokens", 0) or 0
+            state["context_tokens"] = (
+                (usage.get("input_tokens", 0) or 0)
+                + (usage.get("cache_creation_input_tokens", 0) or 0)
+                + (usage.get("cache_read_input_tokens", 0) or 0)
+            )
     return state
 
 
@@ -1595,6 +1741,8 @@ def live_stats_payload(state):
         "messages": state["messages"],
         "tool_calls": sum(state["tool_counts"].values()),
         "commits": state["commits"],
+        "context_tokens": state["context_tokens"],
+        "output_tokens": state["output_tokens"],
     }
 
 
@@ -1725,6 +1873,10 @@ LIVE_JS = r"""
   var messages = document.getElementById('messages');
   var tocList = document.getElementById('toc-list');
   var statusEl = document.getElementById('live-status');
+  // Live mode: no embedded JSON payload — build an empty card and let the
+  // SSE handlers below feed it.
+  var card = window.sessionCard || null;
+  if (card) card.init(null);
 
   function nearBottom() {
     return (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 120);
@@ -1744,6 +1896,7 @@ LIVE_JS = r"""
     if (messages) messages.innerHTML = '';
     if (tocList) tocList.innerHTML = '';
     setCount('stat-prompts', 0); setCount('stat-messages', 0); setCount('stat-tools', 0); setCount('stat-commits', 0);
+    if (card) card.reset();
   });
   es.addEventListener('append', function (e) {
     var payload = JSON.parse(e.data);
@@ -1754,10 +1907,20 @@ LIVE_JS = r"""
     if (!node || !messages) return;
     messages.appendChild(node);
     enhance(node);
+    // Client-side recap fallback: the latest assistant text stands in until
+    // a real away-summary recap arrives (which then pins the section).
+    if (card) {
+      var ats = node.querySelectorAll('.assistant-text');
+      if (ats.length) {
+        var txt = (ats[ats.length - 1].innerText || '').replace(/\s+/g, ' ').trim();
+        if (txt) card.setRecap(txt.length > 280 ? txt.slice(0, 277) + '...' : txt, false);
+      }
+    }
     if (stick) window.scrollTo(0, document.body.scrollHeight);
   });
   es.addEventListener('prompt', function (e) {
     var p = JSON.parse(e.data);
+    if (card) card.addPrompt(p); // no link on the wire -> in-page '#'+id
     if (!tocList) return;
     var li = document.createElement('li');
     var a = document.createElement('a');
@@ -1772,6 +1935,10 @@ LIVE_JS = r"""
     setCount('stat-messages', s.messages);
     setCount('stat-tools', s.tool_calls);
     setCount('stat-commits', s.commits);
+    if (card) {
+      card.setStats(s);
+      card.setUsage({ context_tokens: s.context_tokens, output_tokens: s.output_tokens });
+    }
   });
   es.addEventListener('title', function (e) {
     var t = JSON.parse(e.data).title;
@@ -1779,6 +1946,11 @@ LIVE_JS = r"""
     document.title = t + ' (live)';
     var h = document.getElementById('session-title');
     if (h) h.textContent = t; // textContent: never parsed as HTML
+    if (card) card.setTitle(t);
+  });
+  es.addEventListener('recap', function (e) {
+    var r = JSON.parse(e.data);
+    if (card && r.text) card.setRecap(r.text, true);
   });
 })();
 """
@@ -1829,7 +2001,13 @@ class _LiveHandler(BaseHTTPRequestHandler):
             session_title = None  # file may not exist yet — title arrives live
         body = (
             get_template("live.html")
-            .render(css=CSS + LIVE_CSS, js=LIVE_JS, session_title=session_title)
+            .render(
+                # CARD_JS before LIVE_JS: the SSE handlers call into
+                # window.sessionCard, so the card API must exist first.
+                css=CSS + LIVE_CSS + CARD_CSS,
+                js=CARD_JS + LIVE_JS,
+                session_title=session_title,
+            )
             .encode("utf-8")
         )
         self.send_response(200)
@@ -1864,6 +2042,7 @@ class _LiveHandler(BaseHTTPRequestHandler):
             offset = 0
             state = new_live_stats()
             last_title = None
+            last_recap = None
             while not stop_event.is_set():
                 if not path.exists():
                     if stop_event.wait(poll):
@@ -1875,6 +2054,7 @@ class _LiveHandler(BaseHTTPRequestHandler):
                     offset = 0
                     state = new_live_stats()
                     last_title = None
+                    last_recap = None
                 loglines, offset = read_new_loglines(path, offset)
                 changed = False
                 for entry in loglines:
@@ -1884,6 +2064,13 @@ class _LiveHandler(BaseHTTPRequestHandler):
                             last_title = entry["title"]
                             self._sse_write(
                                 format_sse_event("title", {"title": last_title})
+                            )
+                        continue
+                    if entry.get("type") == "away-summary":
+                        if entry["text"] and entry["text"] != last_recap:
+                            last_recap = entry["text"]
+                            self._sse_write(
+                                format_sse_event("recap", {"text": last_recap})
                             )
                         continue
                     fragment = render_logline(entry)
@@ -2180,6 +2367,225 @@ document.querySelectorAll('.message').forEach(function(msg) {
 });
 """
 
+# Floating session info card. One implementation, two data feeds: static
+# pages embed a JSON payload (session_card.html) that auto-inits the card;
+# the live view drives the same API from SSE events. All text lands via
+# textContent, so neither feed needs an HTML-escaping path.
+CARD_CSS = """
+#session-card { position: fixed; right: 16px; bottom: 16px; z-index: 1000; font-size: 0.85rem; }
+#session-card .card-pill { display: flex; align-items: center; gap: 8px; background: var(--user-border); color: white; border: none; border-radius: 999px; padding: 8px 14px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.25); font-size: 0.85rem; }
+#session-card .card-pill:hover { background: #1565c0; }
+#session-card .card-panel { display: none; width: 340px; max-width: calc(100vw - 32px); max-height: 70vh; overflow-y: auto; background: var(--card-bg); border: 1px solid var(--assistant-border); border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,0.25); padding: 12px 14px; }
+#session-card.card-open .card-pill { display: none; }
+#session-card.card-open .card-panel { display: block; }
+#session-card .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+#session-card .card-title { font-weight: 600; line-height: 1.3; }
+#session-card .card-close { background: transparent; border: none; cursor: pointer; font-size: 1.1rem; color: var(--text-muted); padding: 0 2px; line-height: 1; }
+#session-card .card-close:hover { color: var(--text-color); }
+#session-card .card-stats { color: var(--text-muted); margin-bottom: 6px; }
+#session-card .card-usage { color: var(--text-muted); margin-bottom: 8px; }
+#session-card .card-section-label { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin: 8px 0 4px; }
+#session-card .card-recap-text { background: var(--thinking-bg); border-left: 3px solid var(--thinking-border); border-radius: 6px; padding: 8px 10px; }
+#session-card .card-prompt-list { margin: 0; padding-left: 22px; max-height: 32vh; overflow-y: auto; }
+#session-card .card-prompt-list li { margin: 2px 0; }
+#session-card .card-prompt-list a { color: inherit; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; max-width: 100%; }
+#session-card .card-prompt-list a:hover { text-decoration: underline; }
+#session-card .card-nav { display: flex; gap: 8px; margin-top: 10px; }
+#session-card .card-nav-btn { flex: 1; text-align: center; background: var(--user-bg); color: var(--user-border); border: 1px solid var(--user-border); border-radius: 6px; padding: 6px 8px; text-decoration: none; cursor: pointer; }
+#session-card .card-nav-btn:hover { background: rgba(25, 118, 210, 0.15); }
+@media print { #session-card { display: none; } }
+"""
+
+CARD_JS = r"""
+(function () {
+  var STORAGE_KEY = 'cct-card-expanded';
+  var root = null;
+  var refs = {};
+  var statsState = { prompts: 0, messages: 0, tool_calls: 0, commits: 0 };
+  var lastCtx = null;
+  var recapPinned = false; // a real recap beats assistant-text fallbacks
+
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  function formatTokens(n) {
+    if (n == null || isNaN(n)) return null;
+    return n >= 1000 ? Math.round(n / 1000) + 'k' : String(n);
+  }
+  function isExpanded() {
+    try { return localStorage.getItem(STORAGE_KEY) === '1'; } catch (e) { return false; }
+  }
+  function setExpanded(on) {
+    try { localStorage.setItem(STORAGE_KEY, on ? '1' : '0'); } catch (e) {}
+    if (root) root.classList.toggle('card-open', !!on);
+  }
+
+  function build() {
+    root = document.getElementById('session-card');
+    if (!root) return false;
+    root.innerHTML = '';
+
+    var pill = el('button', 'card-pill');
+    pill.type = 'button';
+    pill.setAttribute('aria-label', 'Session info');
+    refs.pillStats = el('span', 'card-pill-stats', '…');
+    pill.appendChild(refs.pillStats);
+    pill.appendChild(el('span', 'card-pill-icon', 'ⓘ'));
+    pill.addEventListener('click', function () { setExpanded(true); });
+
+    var panel = el('div', 'card-panel');
+    var head = el('div', 'card-head');
+    var h1 = document.getElementById('session-title');
+    refs.title = el('div', 'card-title', h1 ? h1.textContent : '');
+    var close = el('button', 'card-close', '×');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Collapse session info');
+    close.addEventListener('click', function () { setExpanded(false); });
+    head.appendChild(refs.title);
+    head.appendChild(close);
+    panel.appendChild(head);
+
+    refs.stats = el('div', 'card-stats', '');
+    panel.appendChild(refs.stats);
+    refs.usage = el('div', 'card-usage', '');
+    refs.usage.hidden = true;
+    panel.appendChild(refs.usage);
+
+    refs.recapWrap = el('div', 'card-recap');
+    refs.recapWrap.hidden = true;
+    refs.recapLabel = el('div', 'card-section-label', 'Recap');
+    refs.recapText = el('div', 'card-recap-text', '');
+    refs.recapWrap.appendChild(refs.recapLabel);
+    refs.recapWrap.appendChild(refs.recapText);
+    panel.appendChild(refs.recapWrap);
+
+    var promptsWrap = el('div', 'card-prompts');
+    promptsWrap.appendChild(el('div', 'card-section-label', 'Prompts'));
+    refs.promptList = el('ol', 'card-prompt-list');
+    promptsWrap.appendChild(refs.promptList);
+    panel.appendChild(promptsWrap);
+
+    var nav = el('div', 'card-nav');
+    var topBtn = el('a', 'card-nav-btn', '▲ top');
+    topBtn.href = '#';
+    topBtn.addEventListener('click', function (e) {
+      e.preventDefault();
+      window.scrollTo(0, 0);
+    });
+    refs.latestBtn = el('a', 'card-nav-btn', '⤓ latest');
+    refs.latestBtn.href = '#';
+    refs.latestBtn.addEventListener('click', function (e) {
+      if (refs.latestBtn.dataset.href) return; // static: real link navigates
+      e.preventDefault();
+      window.scrollTo(0, document.body.scrollHeight); // live: jump to tail
+    });
+    nav.appendChild(topBtn);
+    nav.appendChild(refs.latestBtn);
+    panel.appendChild(nav);
+
+    root.appendChild(pill);
+    root.appendChild(panel);
+    root.hidden = false;
+    if (isExpanded()) root.classList.add('card-open');
+    return true;
+  }
+
+  function updatePill() {
+    if (!refs.pillStats) return;
+    var bits = [statsState.prompts + 'p'];
+    if (lastCtx) bits.push('ctx ' + lastCtx);
+    refs.pillStats.textContent = bits.join(' · ');
+  }
+  function setTitle(t) {
+    if (t && refs.title) refs.title.textContent = t;
+  }
+  function setStats(s) {
+    if (!s) return;
+    statsState = s;
+    if (refs.stats) {
+      refs.stats.textContent = s.prompts + ' prompts · ' + s.messages +
+        ' messages · ' + s.tool_calls + ' tools · ' + s.commits + ' commits';
+    }
+    updatePill();
+  }
+  function setUsage(u) {
+    if (!refs.usage) return;
+    var ctx = u ? formatTokens(u.context_tokens) : null;
+    var out = u ? formatTokens(u.output_tokens) : null;
+    lastCtx = ctx;
+    if (!ctx && !out) { refs.usage.hidden = true; updatePill(); return; }
+    var parts = [];
+    if (ctx) parts.push('Context ' + ctx);
+    if (out) parts.push('Output ' + out);
+    refs.usage.textContent = parts.join(' · ');
+    refs.usage.hidden = false;
+    updatePill();
+  }
+  function setRecap(text, isReal) {
+    if (!refs.recapWrap || !text) return;
+    if (recapPinned && !isReal) return;
+    recapPinned = recapPinned || !!isReal;
+    refs.recapLabel.textContent = isReal ? 'Recap' : 'Latest reply';
+    refs.recapText.textContent = text;
+    refs.recapWrap.hidden = false;
+  }
+  function addPrompt(p) {
+    if (!refs.promptList || !p) return;
+    var li = el('li');
+    var a = el('a', null, '#' + p.num + '  ' + p.preview);
+    a.href = p.link || ('#' + p.id);
+    li.appendChild(a);
+    refs.promptList.appendChild(li);
+  }
+  function setPrompts(list) {
+    if (!refs.promptList) return;
+    refs.promptList.innerHTML = '';
+    (list || []).forEach(addPrompt);
+  }
+  function setLatestLink(href) {
+    if (!refs.latestBtn || !href) return;
+    refs.latestBtn.href = href;
+    refs.latestBtn.dataset.href = href;
+  }
+  function reset() {
+    recapPinned = false;
+    lastCtx = null;
+    setStats({ prompts: 0, messages: 0, tool_calls: 0, commits: 0 });
+    if (refs.usage) refs.usage.hidden = true;
+    if (refs.recapWrap) refs.recapWrap.hidden = true;
+    if (refs.promptList) refs.promptList.innerHTML = '';
+  }
+  function init(data) {
+    if (!build()) return;
+    reset();
+    if (!data) return;
+    setTitle(data.title);
+    setStats(data.stats);
+    setUsage(data.usage);
+    if (data.recap && data.recap.text) {
+      setRecap(data.recap.text, data.recap.source === 'recap');
+    }
+    setPrompts(data.prompts);
+    setLatestLink(data.latest_link);
+  }
+
+  window.sessionCard = {
+    init: init, reset: reset, setTitle: setTitle, setStats: setStats,
+    setUsage: setUsage, setRecap: setRecap, addPrompt: addPrompt,
+    setPrompts: setPrompts, setLatestLink: setLatestLink
+  };
+
+  // Static pages: auto-init from the embedded JSON payload.
+  var dataEl = document.getElementById('session-card-data');
+  if (dataEl) {
+    try { init(JSON.parse(dataEl.textContent)); } catch (e) {}
+  }
+})();
+"""
+
 # JavaScript to fix relative URLs when served via gisthost.github.io or gistpreview.github.io
 # Fixes issue #26: Pagination links broken on gisthost.github.io
 GIST_PREVIEW_JS = r"""
@@ -2334,12 +2740,22 @@ def generate_index_pagination_html(total_pages):
     return _macros.index_pagination(total_pages)
 
 
-def generate_html(json_path, output_dir, github_repo=None, title=None):
+def generate_html(json_path, output_dir, github_repo=None, title=None, recap=None):
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
 
     if title is None:
-        title = get_session_title(json_path)
+        # CLI path: one scan yields both the name and the recap. Batch callers
+        # (generate_batch_html) pass both in from the scan they already did.
+        json_path_p = Path(json_path)
+        if json_path_p.suffix == ".jsonl":
+            meta = scan_session_metadata(json_path_p, max_length=80)
+            if meta.title and meta.title != "(no summary)":
+                title = meta.title
+            if recap is None:
+                recap = meta.recap
+        else:
+            title = get_session_title(json_path)
 
     # Load session file (supports both JSON and JSONL)
     data = parse_session_file(json_path)
@@ -2396,38 +2812,8 @@ def generate_html(json_path, output_dir, github_repo=None, title=None):
     total_convs = len(conversations)
     total_pages = (total_convs + PROMPTS_PER_PAGE - 1) // PROMPTS_PER_PAGE
 
-    for page_num in range(1, total_pages + 1):
-        start_idx = (page_num - 1) * PROMPTS_PER_PAGE
-        end_idx = min(start_idx + PROMPTS_PER_PAGE, total_convs)
-        page_convs = conversations[start_idx:end_idx]
-        messages_html = []
-        for conv in page_convs:
-            is_first = True
-            for log_type, message_json, timestamp in conv["messages"]:
-                msg_html = render_message(log_type, message_json, timestamp)
-                if msg_html:
-                    # Wrap continuation summaries in collapsed details
-                    if is_first and conv.get("is_continuation"):
-                        msg_html = f'<details class="continuation"><summary>Session continuation summary</summary>{msg_html}</details>'
-                    messages_html.append(msg_html)
-                is_first = False
-        pagination_html = generate_pagination_html(page_num, total_pages)
-        page_template = get_template("page.html")
-        page_content = page_template.render(
-            css=CSS,
-            js=JS,
-            session_title=title,
-            page_num=page_num,
-            total_pages=total_pages,
-            pagination_html=pagination_html,
-            messages_html="".join(messages_html),
-        )
-        (output_dir / f"page-{page_num:03d}.html").write_text(
-            page_content, encoding="utf-8"
-        )
-        print(f"Generated page-{page_num:03d}.html")
-
-    # Calculate overall stats and collect all commits for timeline
+    # Stats, commits, and the prompt timeline are computed BEFORE page
+    # rendering so the session-card payload can be embedded in every page.
     total_tool_counts = {}
     total_messages = 0
     all_commits = []  # (timestamp, hash, message, page_num, conv_index)
@@ -2444,6 +2830,7 @@ def generate_html(json_path, output_dir, github_repo=None, title=None):
 
     # Build timeline items: prompts and commits merged by timestamp
     timeline_items = []
+    card_prompts = []
 
     # Add prompts
     prompt_num = 0
@@ -2457,6 +2844,15 @@ def generate_html(json_path, output_dir, github_repo=None, title=None):
         msg_id = make_msg_id(conv["timestamp"])
         link = f"page-{page_num:03d}.html#{msg_id}"
         rendered_content = render_markdown_text(conv["user_text"])
+        card_prompts.append(
+            {
+                "num": prompt_num,
+                "id": msg_id,
+                "link": link,
+                "preview": prompt_preview(conv["user_text"]),
+                "timestamp": conv["timestamp"],
+            }
+        )
 
         # Collect all messages including from subsequent continuation conversations
         # This ensures long_texts from continuations appear with the original prompt
@@ -2493,12 +2889,68 @@ def generate_html(json_path, output_dir, github_repo=None, title=None):
     timeline_items.sort(key=lambda x: x[0])
     index_items = [item[2] for item in timeline_items]
 
+    # Jump-to-latest targets the last message on the last page.
+    if conversations:
+        last_ts = conversations[-1]["messages"][-1][2]
+        latest_page = (len(conversations) - 1) // PROMPTS_PER_PAGE + 1
+        latest_link = f"page-{latest_page:03d}.html#{make_msg_id(last_ts)}"
+    else:
+        latest_link = None
+
+    card_data = build_card_data(
+        title,
+        prompt_num,
+        total_messages,
+        total_tool_calls,
+        total_commits,
+        loglines,
+        recap,
+        card_prompts,
+        latest_link,
+    )
+    # "</" must not appear raw inside a <script> block; "<\/" is the
+    # equivalent JSON escape, preventing </script> breakout.
+    card_json = json.dumps(card_data).replace("</", "<\\/")
+
+    for page_num in range(1, total_pages + 1):
+        start_idx = (page_num - 1) * PROMPTS_PER_PAGE
+        end_idx = min(start_idx + PROMPTS_PER_PAGE, total_convs)
+        page_convs = conversations[start_idx:end_idx]
+        messages_html = []
+        for conv in page_convs:
+            is_first = True
+            for log_type, message_json, timestamp in conv["messages"]:
+                msg_html = render_message(log_type, message_json, timestamp)
+                if msg_html:
+                    # Wrap continuation summaries in collapsed details
+                    if is_first and conv.get("is_continuation"):
+                        msg_html = f'<details class="continuation"><summary>Session continuation summary</summary>{msg_html}</details>'
+                    messages_html.append(msg_html)
+                is_first = False
+        pagination_html = generate_pagination_html(page_num, total_pages)
+        page_template = get_template("page.html")
+        page_content = page_template.render(
+            css=CSS + CARD_CSS,
+            js=JS + CARD_JS,
+            session_title=title,
+            card_json=card_json,
+            page_num=page_num,
+            total_pages=total_pages,
+            pagination_html=pagination_html,
+            messages_html="".join(messages_html),
+        )
+        (output_dir / f"page-{page_num:03d}.html").write_text(
+            page_content, encoding="utf-8"
+        )
+        print(f"Generated page-{page_num:03d}.html")
+
     index_pagination = generate_index_pagination_html(total_pages)
     index_template = get_template("index.html")
     index_content = index_template.render(
-        css=CSS,
-        js=JS,
+        css=CSS + CARD_CSS,
+        js=JS + CARD_JS,
         session_title=title,
+        card_json=card_json,
         pagination_html=index_pagination,
         prompt_num=prompt_num,
         total_messages=total_messages,
@@ -2901,8 +3353,10 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
 
-    # Web sessions carry their own display title.
+    # Web sessions carry their own display title; they have no away-summary
+    # recaps, so the card falls back to the last assistant snippet.
     title = session_data.get("title")
+    recap = None
 
     loglines = session_data.get("loglines", [])
 
@@ -2952,38 +3406,8 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
     total_convs = len(conversations)
     total_pages = (total_convs + PROMPTS_PER_PAGE - 1) // PROMPTS_PER_PAGE
 
-    for page_num in range(1, total_pages + 1):
-        start_idx = (page_num - 1) * PROMPTS_PER_PAGE
-        end_idx = min(start_idx + PROMPTS_PER_PAGE, total_convs)
-        page_convs = conversations[start_idx:end_idx]
-        messages_html = []
-        for conv in page_convs:
-            is_first = True
-            for log_type, message_json, timestamp in conv["messages"]:
-                msg_html = render_message(log_type, message_json, timestamp)
-                if msg_html:
-                    # Wrap continuation summaries in collapsed details
-                    if is_first and conv.get("is_continuation"):
-                        msg_html = f'<details class="continuation"><summary>Session continuation summary</summary>{msg_html}</details>'
-                    messages_html.append(msg_html)
-                is_first = False
-        pagination_html = generate_pagination_html(page_num, total_pages)
-        page_template = get_template("page.html")
-        page_content = page_template.render(
-            css=CSS,
-            js=JS,
-            session_title=title,
-            page_num=page_num,
-            total_pages=total_pages,
-            pagination_html=pagination_html,
-            messages_html="".join(messages_html),
-        )
-        (output_dir / f"page-{page_num:03d}.html").write_text(
-            page_content, encoding="utf-8"
-        )
-        click.echo(f"Generated page-{page_num:03d}.html")
-
-    # Calculate overall stats and collect all commits for timeline
+    # Stats, commits, and the prompt timeline are computed BEFORE page
+    # rendering so the session-card payload can be embedded in every page.
     total_tool_counts = {}
     total_messages = 0
     all_commits = []  # (timestamp, hash, message, page_num, conv_index)
@@ -3000,6 +3424,7 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
 
     # Build timeline items: prompts and commits merged by timestamp
     timeline_items = []
+    card_prompts = []
 
     # Add prompts
     prompt_num = 0
@@ -3013,6 +3438,15 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
         msg_id = make_msg_id(conv["timestamp"])
         link = f"page-{page_num:03d}.html#{msg_id}"
         rendered_content = render_markdown_text(conv["user_text"])
+        card_prompts.append(
+            {
+                "num": prompt_num,
+                "id": msg_id,
+                "link": link,
+                "preview": prompt_preview(conv["user_text"]),
+                "timestamp": conv["timestamp"],
+            }
+        )
 
         # Collect all messages including from subsequent continuation conversations
         # This ensures long_texts from continuations appear with the original prompt
@@ -3049,12 +3483,68 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
     timeline_items.sort(key=lambda x: x[0])
     index_items = [item[2] for item in timeline_items]
 
+    # Jump-to-latest targets the last message on the last page.
+    if conversations:
+        last_ts = conversations[-1]["messages"][-1][2]
+        latest_page = (len(conversations) - 1) // PROMPTS_PER_PAGE + 1
+        latest_link = f"page-{latest_page:03d}.html#{make_msg_id(last_ts)}"
+    else:
+        latest_link = None
+
+    card_data = build_card_data(
+        title,
+        prompt_num,
+        total_messages,
+        total_tool_calls,
+        total_commits,
+        loglines,
+        recap,
+        card_prompts,
+        latest_link,
+    )
+    # "</" must not appear raw inside a <script> block; "<\/" is the
+    # equivalent JSON escape, preventing </script> breakout.
+    card_json = json.dumps(card_data).replace("</", "<\\/")
+
+    for page_num in range(1, total_pages + 1):
+        start_idx = (page_num - 1) * PROMPTS_PER_PAGE
+        end_idx = min(start_idx + PROMPTS_PER_PAGE, total_convs)
+        page_convs = conversations[start_idx:end_idx]
+        messages_html = []
+        for conv in page_convs:
+            is_first = True
+            for log_type, message_json, timestamp in conv["messages"]:
+                msg_html = render_message(log_type, message_json, timestamp)
+                if msg_html:
+                    # Wrap continuation summaries in collapsed details
+                    if is_first and conv.get("is_continuation"):
+                        msg_html = f'<details class="continuation"><summary>Session continuation summary</summary>{msg_html}</details>'
+                    messages_html.append(msg_html)
+                is_first = False
+        pagination_html = generate_pagination_html(page_num, total_pages)
+        page_template = get_template("page.html")
+        page_content = page_template.render(
+            css=CSS + CARD_CSS,
+            js=JS + CARD_JS,
+            session_title=title,
+            card_json=card_json,
+            page_num=page_num,
+            total_pages=total_pages,
+            pagination_html=pagination_html,
+            messages_html="".join(messages_html),
+        )
+        (output_dir / f"page-{page_num:03d}.html").write_text(
+            page_content, encoding="utf-8"
+        )
+        click.echo(f"Generated page-{page_num:03d}.html")
+
     index_pagination = generate_index_pagination_html(total_pages)
     index_template = get_template("index.html")
     index_content = index_template.render(
-        css=CSS,
-        js=JS,
+        css=CSS + CARD_CSS,
+        js=JS + CARD_JS,
         session_title=title,
+        card_json=card_json,
         pagination_html=index_pagination,
         prompt_num=prompt_num,
         total_messages=total_messages,

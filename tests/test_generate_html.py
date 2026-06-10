@@ -1623,6 +1623,170 @@ class TestSessionTitles:
         assert "Fix the flux capacitor · Claude Code transcript" in content
 
 
+class TestSessionCard:
+    """The floating session info card: a mount node + embedded JSON payload on
+    every generated page, rendered client-side by CARD_JS."""
+
+    def _session_jsonl(self, tmp_path, with_recap=True):
+        """Multi-page JSONL (6 prompts -> 2 pages) with ai-title, assistant
+        usage, and optionally an away_summary — mirroring verified real-file
+        shapes (Claude Code v2.1.x, 2026-06-10)."""
+        lines = [{"type": "ai-title", "aiTitle": "Build the card", "sessionId": "x"}]
+        for i in range(6):
+            lines.append(
+                {
+                    "type": "user",
+                    "timestamp": f"2025-01-01T10:0{i}:00.000Z",
+                    "message": {"role": "user", "content": f"prompt number {i}"},
+                }
+            )
+            lines.append(
+                {
+                    "type": "assistant",
+                    "timestamp": f"2025-01-01T10:0{i}:30.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": f"reply {i}"}],
+                        "usage": {
+                            "input_tokens": 10,
+                            "cache_creation_input_tokens": 5,
+                            "cache_read_input_tokens": 100 * i,
+                            "output_tokens": 7,
+                        },
+                    },
+                }
+            )
+        if with_recap:
+            lines.append(
+                {
+                    "type": "system",
+                    "subtype": "away_summary",
+                    "content": "All slices shipped. (disable recaps in /config)",
+                    "isMeta": False,
+                    "timestamp": "2025-01-01T11:00:00.000Z",
+                }
+            )
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        return f
+
+    def _card_data(self, html_text):
+        blob = html_text.split('id="session-card-data"')[1]
+        blob = blob.split(">", 1)[1].split("</script>")[0]
+        return json.loads(blob)
+
+    def test_card_mount_and_data_on_every_page(self, tmp_path):
+        f = self._session_jsonl(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        for page in ["index.html", "page-001.html", "page-002.html"]:
+            content = (out / page).read_text(encoding="utf-8")
+            assert 'id="session-card"' in content, page
+            assert 'id="session-card-data"' in content, page
+
+    def test_card_payload_contents(self, tmp_path):
+        f = self._session_jsonl(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        data = self._card_data((out / "index.html").read_text(encoding="utf-8"))
+        assert data["title"] == "Build the card"
+        assert data["stats"] == {
+            "prompts": 6,
+            "messages": 12,
+            "tool_calls": 0,
+            "commits": 0,
+        }
+        assert len(data["prompts"]) == 6
+        first, last = data["prompts"][0], data["prompts"][5]
+        assert first["num"] == 1
+        assert first["link"].startswith("page-001.html#msg-")
+        assert first["preview"] == "prompt number 0"
+        assert last["link"].startswith("page-002.html#msg-")
+        assert data["latest_link"].startswith("page-002.html#msg-")
+        # usage: latest assistant context, summed output
+        assert data["usage"] == {
+            "context_tokens": 10 + 5 + 500,
+            "output_tokens": 7 * 6,
+        }
+        # recap prefers away_summary; UI-hint suffix stripped
+        assert data["recap"] == {"text": "All slices shipped.", "source": "recap"}
+
+    def test_card_recap_falls_back_to_assistant_text(self, tmp_path):
+        f = self._session_jsonl(tmp_path, with_recap=False)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        data = self._card_data((out / "index.html").read_text(encoding="utf-8"))
+        assert data["recap"] == {"text": "reply 5", "source": "assistant"}
+
+    def test_card_on_web_session_data(self, tmp_path):
+        """Web JSON exports: no usage recorded -> context null; recap falls
+        back to assistant text; the API title fills the card header."""
+        from claude_code_transcripts import generate_html_from_session_data
+
+        session_data = {
+            "title": "Web one",
+            "loglines": [
+                {
+                    "type": "user",
+                    "timestamp": "2025-01-01T10:00:00.000Z",
+                    "message": {"role": "user", "content": "hi"},
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2025-01-01T10:00:30.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "the reply"}],
+                    },
+                },
+            ],
+        }
+        out = tmp_path / "out"
+        generate_html_from_session_data(session_data, out)
+        data = self._card_data((out / "index.html").read_text(encoding="utf-8"))
+        assert data["title"] == "Web one"
+        assert data["usage"]["context_tokens"] is None
+        assert data["recap"] == {"text": "the reply", "source": "assistant"}
+
+    def test_card_json_script_safe(self, tmp_path):
+        """A recap containing </script> must not break out of the data block."""
+        lines = [
+            {
+                "type": "user",
+                "timestamp": "2025-01-01T10:00:00.000Z",
+                "message": {"role": "user", "content": "hi"},
+            },
+            {
+                "type": "system",
+                "subtype": "away_summary",
+                "content": "Closing tag </script> inside.",
+                "isMeta": False,
+                "timestamp": "2025-01-01T11:00:00.000Z",
+            },
+        ]
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+        )
+        out = tmp_path / "out"
+        generate_html(f, out)
+        content = (out / "index.html").read_text(encoding="utf-8")
+        blob = content.split('id="session-card-data"')[1].split("</script>")[0]
+        assert "</script>" not in blob  # escaped as <\/script> in the JSON
+        data = self._card_data(content)
+        assert data["recap"]["text"] == "Closing tag </script> inside."
+
+    def test_card_css_js_present(self, tmp_path):
+        f = self._session_jsonl(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        page = (out / "page-001.html").read_text(encoding="utf-8")
+        assert "#session-card" in page  # CARD_CSS shipped
+        assert "sessionCard" in page  # CARD_JS shipped
+
+
 class TestLocalSessionCLI:
     """Tests for CLI behavior with local sessions."""
 
