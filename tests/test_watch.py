@@ -57,6 +57,23 @@ def _assistant_line(text, usage=None, ts="T"):
     return (json.dumps(obj) + "\n").encode("utf-8")
 
 
+INSIGHT_BLOCK_TEXT = (
+    "`★ Insight ─────────────────────────────────────`\n"
+    "- Anchors are assigned by content position\n"
+    "`─────────────────────────────────────────────────`"
+)
+
+
+def _assistant_blocks_line(blocks, ts="T"):
+    """One JSONL assistant line with explicit content blocks."""
+    obj = {
+        "type": "assistant",
+        "timestamp": ts,
+        "message": {"role": "assistant", "content": blocks},
+    }
+    return (json.dumps(obj) + "\n").encode("utf-8")
+
+
 def _away_summary_line(content, ts="T"):
     """One away_summary system line — Claude Code's persisted recap.
 
@@ -1098,6 +1115,224 @@ class TestLiveServer:
                 payload = _data_for(more, "stats")[-1]
                 assert payload["context_tokens"] == 101  # latest, not summed
                 assert payload["output_tokens"] == 10  # summed
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_artifact_events_stream_immediately(self, tmp_path):
+        """Insight/thinking/plan artifacts stream as their entry renders; the
+        completion is withheld until the turn provably ended (next prompt)."""
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(
+            _user_line("first prompt", "2025-01-01T10:00:00.000Z")
+            + _assistant_blocks_line(
+                [
+                    {"type": "thinking", "thinking": "deep thought " * 30},
+                    {"type": "text", "text": INSIGHT_BLOCK_TEXT},
+                    {"type": "text", "text": "still working"},
+                ],
+                ts="2025-01-01T10:00:30.000Z",
+            )
+        )
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                initial = _collect_sse(
+                    lines, lambda evs: any(ev == "stats" for ev, _ in evs)
+                )
+                arts = _data_for(initial, "artifact")
+                assert [a["type"] for a in arts] == ["thinking", "insight"]
+                assert all(a["prompt"] == 1 for a in arts)
+                assert arts[0]["id"] == "msg-2025-01-01T10-00-30-000Z-b0"
+                assert arts[1]["label"] == "Anchors are assigned by content position"
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_completion_emitted_retroactively_on_next_prompt(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(
+            _user_line("first prompt", "2025-01-01T10:00:00.000Z")
+            + _assistant_blocks_line(
+                [{"type": "text", "text": "the final reply"}],
+                ts="2025-01-01T10:00:30.000Z",
+            )
+        )
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                initial = _collect_sse(
+                    lines, lambda evs: any(ev == "stats" for ev, _ in evs)
+                )
+                assert _data_for(initial, "artifact") == []  # turn still open
+
+                with open(p, "ab") as f:
+                    f.write(_user_line("second prompt", "2025-01-01T10:05:00.000Z"))
+                    f.flush()
+                    os.fsync(f.fileno())
+                more = _collect_sse(
+                    lines,
+                    lambda evs: any(
+                        ev == "prompt" and json.loads(d)["num"] == 2 for ev, d in evs
+                    ),
+                )
+                arts = _data_for(more, "artifact")
+                assert arts == [
+                    {
+                        "prompt": 1,
+                        "type": "completion",
+                        "label": "the final reply",
+                        "id": "msg-2025-01-01T10-00-30-000Z-b0",
+                    }
+                ]
+                # The completion lands before the new prompt event.
+                kinds = [ev for ev, _ in more if ev in ("artifact", "prompt")]
+                assert kinds.index("artifact") < kinds.index("prompt")
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_completion_retype_same_anchor_when_insight_is_last(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(
+            _user_line("first prompt", "2025-01-01T10:00:00.000Z")
+            + _assistant_blocks_line(
+                [{"type": "text", "text": INSIGHT_BLOCK_TEXT}],
+                ts="2025-01-01T10:00:30.000Z",
+            )
+        )
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                initial = _collect_sse(
+                    lines, lambda evs: any(ev == "stats" for ev, _ in evs)
+                )
+                first = _data_for(initial, "artifact")
+                assert [a["type"] for a in first] == ["insight"]
+                anchor = first[0]["id"]
+
+                with open(p, "ab") as f:
+                    f.write(_user_line("second prompt", "2025-01-01T10:05:00.000Z"))
+                    f.flush()
+                    os.fsync(f.fileno())
+                more = _collect_sse(
+                    lines, lambda evs: any(ev == "artifact" for ev, _ in evs)
+                )
+                completion = _data_for(more, "artifact")[0]
+                assert completion["type"] == "completion"
+                assert completion["id"] == anchor  # same block: client retypes
+                assert completion["label"] == "Anchors are assigned by content position"
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_truncation_clears_pending_completion(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(
+            _user_line("first prompt one", "2025-01-01T10:00:00.000Z")
+            + _assistant_blocks_line(
+                [{"type": "text", "text": "pre-reset reply"}],
+                ts="2025-01-01T10:00:30.000Z",
+            )
+            + _user_line("padding prompt two", "2025-01-01T10:01:00.000Z")
+        )
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                _collect_sse(
+                    lines,
+                    lambda evs: any(
+                        ev == "stats" and json.loads(d)["prompts"] == 2 for ev, d in evs
+                    ),
+                )
+
+                # Truncate to a SMALLER fresh file -> reset; the old open
+                # turn's reply must not leak a completion afterwards.
+                p.write_bytes(_user_line("brand new", "2025-01-01T11:00:00.000Z"))
+                after = _collect_sse(
+                    lines,
+                    lambda evs: any(
+                        ev == "stats" and json.loads(d)["prompts"] == 1 for ev, d in evs
+                    ),
+                )
+                assert any(ev == "reset" for ev, _ in after)
+                assert all(
+                    a["label"] != "pre-reset reply"
+                    for a in _data_for(after, "artifact")
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_artifacts_before_first_prompt_skipped(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(
+            _assistant_blocks_line(
+                [{"type": "text", "text": INSIGHT_BLOCK_TEXT}],
+                ts="2025-01-01T09:59:30.000Z",
+            )
+            + _user_line("first prompt", "2025-01-01T10:00:00.000Z")
+        )
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                initial = _collect_sse(
+                    lines,
+                    lambda evs: any(
+                        ev == "stats" and json.loads(d)["prompts"] == 1 for ev, d in evs
+                    ),
+                )
+                assert _data_for(initial, "artifact") == []
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_shell_js_handles_artifact_events(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(_user_line("hello", "2025-01-01T10:00:00.000Z"))
+
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            body = httpx.get(f"http://127.0.0.1:{port}/", timeout=5).text
+            assert "addEventListener('artifact'" in body
         finally:
             server.shutdown()
             server.server_close()

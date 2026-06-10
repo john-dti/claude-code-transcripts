@@ -2160,6 +2160,10 @@ LIVE_JS = r"""
     var r = JSON.parse(e.data);
     if (card && r.text) card.setRecap(r.text, true);
   });
+  es.addEventListener('artifact', function (e) {
+    var a = JSON.parse(e.data);
+    if (card) card.addArtifact(a.prompt, a);
+  });
 })();
 """
 
@@ -2251,6 +2255,10 @@ class _LiveHandler(BaseHTTPRequestHandler):
             state = new_live_stats()
             last_title = None
             last_recap = None
+            # {"id","label"} of the open turn's final text block — emitted as
+            # a retroactive completion artifact when the next prompt proves
+            # the turn ended.
+            pending_completion = None
             while not stop_event.is_set():
                 if not path.exists():
                     if stop_event.wait(poll):
@@ -2263,6 +2271,7 @@ class _LiveHandler(BaseHTTPRequestHandler):
                     state = new_live_stats()
                     last_title = None
                     last_recap = None
+                    pending_completion = None
                 loglines, offset = read_new_loglines(path, offset)
                 changed = False
                 for entry in loglines:
@@ -2285,9 +2294,26 @@ class _LiveHandler(BaseHTTPRequestHandler):
                     if not fragment:
                         continue
                     self._sse_write(format_sse_event("append", {"html": str(fragment)}))
+                    prev_prompts = state["prompts"]
                     accumulate_live_stats(state, entry)
                     is_prompt, preview = index_prompt(entry)
                     if is_prompt:
+                        # The previous turn provably ended: its final reply
+                        # becomes that prompt's completion artifact, emitted
+                        # BEFORE the new prompt event.
+                        if pending_completion and prev_prompts > 0:
+                            self._sse_write(
+                                format_sse_event(
+                                    "artifact",
+                                    {
+                                        "prompt": prev_prompts,
+                                        "type": "completion",
+                                        "label": pending_completion["label"],
+                                        "id": pending_completion["id"],
+                                    },
+                                )
+                            )
+                        pending_completion = None
                         ts = entry.get("timestamp", "")
                         self._sse_write(
                             format_sse_event(
@@ -2300,6 +2326,16 @@ class _LiveHandler(BaseHTTPRequestHandler):
                                 },
                             )
                         )
+                    if state["prompts"] > 0 and entry.get("type") == "assistant":
+                        immediate, last_text = extract_entry_artifacts(entry)
+                        for art in immediate:
+                            self._sse_write(
+                                format_sse_event(
+                                    "artifact", dict(art, prompt=state["prompts"])
+                                )
+                            )
+                        if last_text:
+                            pending_completion = last_text
                     changed = True
                 if changed:
                     self._sse_write(
