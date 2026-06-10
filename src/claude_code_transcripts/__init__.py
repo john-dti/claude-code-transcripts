@@ -1480,6 +1480,158 @@ def iter_assistant_blocks(message_data, msg_id):
         yield block_anchor(msg_id, i), block
 
 
+# Artifact extraction: the deep-linkable moments of a session (insights,
+# substantial thinking, plans, per-prompt completion replies) that feed the
+# session card's prompt tree and the index timeline.
+INSIGHT_MARKER = "★ Insight"
+ARTIFACT_LABEL_LENGTH = 60
+ARTIFACT_ICONS = {"insight": "★", "thinking": "💭", "plan": "📋", "completion": "✓"}
+
+_MD_HEADING_RE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
+
+
+def artifact_label(text, max_length=ARTIFACT_LABEL_LENGTH):
+    """Whitespace-collapsed, capped label for an artifact link."""
+    return _truncate(" ".join(text.split()), max_length)
+
+
+def is_insight_text(text):
+    """True when a text block is an Insight callout (★ Insight marker)."""
+    return INSIGHT_MARKER in text
+
+
+def insight_label(text):
+    """First meaningful line after the ★ Insight marker, as the link label.
+
+    Separator lines (box-drawing dashes/backticks) and bullet prefixes are
+    skipped/stripped; falls back to the generic label when nothing usable
+    follows the marker.
+    """
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if INSIGHT_MARKER not in line:
+            continue
+        for follow in lines[i + 1 :]:
+            cleaned = follow.strip().strip("`").strip()
+            cleaned = cleaned.lstrip("-*• ").strip()
+            if cleaned and set(cleaned) - {"─", "-", "`"}:
+                return artifact_label(cleaned)
+        break
+    return artifact_label(text)
+
+
+def plan_label(tool_input):
+    """Label for an ExitPlanMode artifact.
+
+    Legacy sessions carried the plan markdown in input.plan — use its first
+    heading. Modern input is {"allowedPrompts": [...]} with the plan text in
+    the tool result, so a generic label is all the input offers.
+    """
+    plan_md = tool_input.get("plan") if isinstance(tool_input, dict) else None
+    if plan_md:
+        match = _MD_HEADING_RE.search(plan_md)
+        if match:
+            return artifact_label("Plan: " + match.group(1))
+    return "Plan presented"
+
+
+def iter_block_artifacts(message_data, msg_id):
+    """Yield (kind, anchor, label) for an assistant message's notable blocks.
+
+    kind: "thinking" (only blocks >= LONG_TEXT_THRESHOLD chars), "insight",
+    "plan" (ExitPlanMode), or "text" — a plain text block, which is not an
+    artifact itself but the running completion candidate. Anchors come from
+    iter_assistant_blocks, the same enumeration rendering uses.
+    """
+    for anchor, block in iter_assistant_blocks(message_data, msg_id):
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "thinking":
+            text = block.get("thinking", "")
+            if len(text) >= LONG_TEXT_THRESHOLD:
+                yield "thinking", anchor, artifact_label(text)
+        elif btype == "text":
+            text = block.get("text", "")
+            if not text:
+                continue
+            if is_insight_text(text):
+                yield "insight", anchor, insight_label(text)
+            else:
+                yield "text", anchor, artifact_label(text)
+        elif btype == "tool_use" and block.get("name") == "ExitPlanMode":
+            yield "plan", anchor, plan_label(block.get("input", {}))
+
+
+def extract_conversation_artifacts(message_groups):
+    """Collect deep-linkable artifacts for one prompt's conversation.
+
+    message_groups: [(page_num, messages)] — the prompt's conversation first,
+    then each continuation conversation with ITS page (continuations can
+    cross page boundaries); messages are (log_type, message_json, timestamp)
+    tuples as built by _build_conversations.
+
+    Returns [{"type","label","anchor","page"}] in block order. The last
+    text-or-insight block becomes the prompt's completion: a plain text block
+    is appended as type "completion"; an insight is retyped in place (its
+    richer label kept) so it isn't listed twice.
+    """
+    artifacts = []
+    # (artifact_index | None, anchor, label, page) of the last text/insight
+    last_text = None
+    for page, messages in message_groups:
+        for log_type, message_json, timestamp in messages:
+            if log_type != "assistant" or not message_json:
+                continue
+            try:
+                message_data = json.loads(message_json)
+            except json.JSONDecodeError:
+                continue
+            msg_id = make_msg_id(timestamp)
+            for kind, anchor, label in iter_block_artifacts(message_data, msg_id):
+                if kind == "text":
+                    last_text = (None, anchor, label, page)
+                    continue
+                artifacts.append(
+                    {"type": kind, "label": label, "anchor": anchor, "page": page}
+                )
+                if kind == "insight":
+                    last_text = (len(artifacts) - 1, anchor, label, page)
+    if last_text is not None:
+        idx, anchor, label, page = last_text
+        if idx is None:
+            artifacts.append(
+                {"type": "completion", "label": label, "anchor": anchor, "page": page}
+            )
+        else:
+            artifacts[idx]["type"] = "completion"
+    return artifacts
+
+
+def extract_entry_artifacts(entry):
+    """Live per-logline artifact split: (immediate, last_text).
+
+    immediate = [{"type","label","id"}] to emit as the entry renders
+    (insight/thinking/plan); last_text = {"id","label"} for the entry's final
+    text-or-insight block — the running completion candidate the server holds
+    until the next prompt arrives (insight keeps its richer label) — or None.
+    """
+    if entry.get("type") != "assistant":
+        return [], None
+    message_data = entry.get("message", {})
+    msg_id = make_msg_id(entry.get("timestamp", ""))
+    immediate = []
+    last_text = None
+    for kind, anchor, label in iter_block_artifacts(message_data, msg_id):
+        if kind == "text":
+            last_text = {"id": anchor, "label": label}
+            continue
+        immediate.append({"type": kind, "label": label, "id": anchor})
+        if kind == "insight":
+            last_text = {"id": anchor, "label": label}
+    return immediate, last_text
+
+
 def analyze_conversation(messages):
     """Analyze messages in a conversation to extract stats and long texts."""
     tool_counts = {}  # tool_name -> count
