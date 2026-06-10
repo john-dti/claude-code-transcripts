@@ -1704,6 +1704,7 @@ class TestSessionCard:
                     "timestamp": f"2025-01-01T10:0{i}:30.000Z",
                     "message": {
                         "role": "assistant",
+                        "model": "claude-fable-5",
                         "content": [{"type": "text", "text": f"reply {i}"}],
                         "usage": {
                             "input_tokens": 10,
@@ -1844,6 +1845,71 @@ class TestSessionCard:
         assert "#session-card" in page  # CARD_CSS shipped
         assert "sessionCard" in page  # CARD_JS shipped
 
+    def test_card_usage_detail_payload(self, tmp_path):
+        """usage_detail: model, latest-turn breakdown, totals, and per-prompt
+        context series (fixture: context = 15 + 100*i for prompt i+1)."""
+        f = self._session_jsonl(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        data = self._card_data((out / "index.html").read_text(encoding="utf-8"))
+        detail = data["usage_detail"]
+        assert detail["model"] == "claude-fable-5"
+        assert detail["last"] == {
+            "input": 10,
+            "cache_read": 500,
+            "cache_creation": 5,
+            "output": 7,
+        }
+        assert detail["totals"] == {
+            "input": 60,
+            "cache_read": 1500,
+            "cache_creation": 30,
+            "output": 42,
+        }
+        assert detail["context_by_prompt"] == [
+            {"num": i + 1, "context_tokens": 15 + 100 * i} for i in range(6)
+        ]
+        # The compact `usage` key is frozen — detail is a sibling.
+        assert data["usage"] == {"context_tokens": 515, "output_tokens": 42}
+
+    def test_card_usage_detail_null_for_web_json(self, tmp_path):
+        from claude_code_transcripts import generate_html_from_session_data
+
+        session_data = {
+            "title": "Web one",
+            "loglines": [
+                {
+                    "type": "user",
+                    "timestamp": "2025-01-01T10:00:00.000Z",
+                    "message": {"role": "user", "content": "hi"},
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2025-01-01T10:00:30.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "the reply"}],
+                    },
+                },
+            ],
+        }
+        out = tmp_path / "out"
+        generate_html_from_session_data(session_data, out)
+        detail = self._card_data((out / "index.html").read_text(encoding="utf-8"))[
+            "usage_detail"
+        ]
+        assert detail["last"] is None
+        assert detail["context_by_prompt"] == [{"num": 1, "context_tokens": None}]
+
+    def test_card_js_has_usage_detail_api(self, tmp_path):
+        f = self._session_jsonl(tmp_path)
+        out = tmp_path / "out"
+        generate_html(f, out)
+        page = (out / "page-001.html").read_text(encoding="utf-8")
+        assert "setUsageDetail" in page
+        assert "recordContext" in page
+        assert "cct-usage-detail" in page  # persisted toggle
+
 
 class TestTitleChapters:
     """ai-title changes appear as chapter dividers in the card prompt list
@@ -1971,6 +2037,59 @@ class TestTitleChapters:
         generate_batch_html(tmp_path / "projects", out)
         content = (out / "devjig" / "s" / "index.html").read_text(encoding="utf-8")
         assert 'class="index-chapter"' in content
+
+
+class TestAnalyzeConversationContext:
+    """analyze_conversation additionally reports the conversation's final
+    context size (last assistant usage), feeding the per-prompt context bars."""
+
+    def _assistant(self, usage, ts="T"):
+        return (
+            "assistant",
+            json.dumps(
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "r"}],
+                    "usage": usage,
+                }
+            ),
+            ts,
+        )
+
+    def test_context_tokens_last_usage_wins(self):
+        messages = [
+            self._assistant(
+                {
+                    "input_tokens": 1,
+                    "cache_creation_input_tokens": 2,
+                    "cache_read_input_tokens": 3,
+                    "output_tokens": 9,
+                },
+                "T1",
+            ),
+            self._assistant(
+                {
+                    "input_tokens": 10,
+                    "cache_creation_input_tokens": 20,
+                    "cache_read_input_tokens": 300,
+                    "output_tokens": 9,
+                },
+                "T2",
+            ),
+        ]
+        assert analyze_conversation(messages)["context_tokens"] == 330
+
+    def test_context_tokens_none_without_usage(self):
+        messages = [
+            (
+                "assistant",
+                json.dumps(
+                    {"role": "assistant", "content": [{"type": "text", "text": "r"}]}
+                ),
+                "T1",
+            )
+        ]
+        assert analyze_conversation(messages)["context_tokens"] is None
 
 
 INSIGHT_BLOCK_TEXT = (

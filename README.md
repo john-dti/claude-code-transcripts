@@ -69,7 +69,7 @@ Every generated page (and the live `watch` view) carries a floating session info
 
 - session name (Claude Code's auto-title)
 - counts: prompts, messages, tool calls, commits
-- usage: current context size and cumulative output tokens, read from the session's recorded `usage` data (hidden when the source has none, e.g. web JSON exports)
+- usage: current context size and cumulative output tokens, read from the session's recorded `usage` data (hidden when the source has none, e.g. web JSON exports). A `▸ details` toggle (persisted) expands a `/usage`-style breakdown: model, latest-turn vs total token table (input / cache read / cache create / output), and a per-prompt context-growth bar chart — click a bar to jump to that prompt.
 - recap: Claude Code's latest "※ recap" away-summary, falling back to the last assistant reply
 - prompt navigation: every prompt links straight to its message, across pages
 - artifact links: each prompt row expands (▸) to deep links into that turn's notable moments — ★ insights, 💭 substantial thinking, 📋 plans, ✓ the final reply — each targeting the exact content block. The same links appear under each prompt on the index timeline.

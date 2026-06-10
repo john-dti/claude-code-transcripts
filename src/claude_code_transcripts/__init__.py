@@ -1653,10 +1653,16 @@ def extract_entry_artifacts(entry):
 
 
 def analyze_conversation(messages):
-    """Analyze messages in a conversation to extract stats and long texts."""
+    """Analyze messages in a conversation to extract stats and long texts.
+
+    Also reports ``context_tokens`` — the conversation's final context size
+    (input + cache fields of its LAST assistant usage), or None — feeding the
+    card's per-prompt context bars at no extra pass.
+    """
     tool_counts = {}  # tool_name -> count
     long_texts = []
     commits = []  # list of (hash, message, timestamp)
+    context_tokens = None
 
     for log_type, message_json, timestamp in messages:
         if not message_json:
@@ -1665,6 +1671,15 @@ def analyze_conversation(messages):
             message_data = json.loads(message_json)
         except json.JSONDecodeError:
             continue
+
+        if log_type == "assistant":
+            usage = message_data.get("usage")
+            if isinstance(usage, dict):
+                context_tokens = (
+                    (usage.get("input_tokens", 0) or 0)
+                    + (usage.get("cache_creation_input_tokens", 0) or 0)
+                    + (usage.get("cache_read_input_tokens", 0) or 0)
+                )
 
         content = message_data.get("content", [])
         if not isinstance(content, list):
@@ -1693,6 +1708,7 @@ def analyze_conversation(messages):
         "tool_counts": tool_counts,
         "long_texts": long_texts,
         "commits": commits,
+        "context_tokens": context_tokens,
     }
 
 
@@ -1815,6 +1831,39 @@ def compute_usage_totals(loglines):
     return {"context_tokens": context, "output_tokens": output}
 
 
+def compute_usage_detail(loglines):
+    """`/usage`-style breakdown for the card's expandable detail view.
+
+    model: ``message.model`` of the latest assistant entry carrying one.
+    last: the latest assistant usage as {input, cache_read, cache_creation,
+        output}, or None when the source recorded no usage (web exports —
+        the card hides the detail toggle).
+    totals: the same four fields summed across all assistant entries.
+    """
+    model = None
+    last = None
+    totals = {"input": 0, "cache_read": 0, "cache_creation": 0, "output": 0}
+    for entry in loglines:
+        if entry.get("type") != "assistant":
+            continue
+        message = entry.get("message", {})
+        if message.get("model"):
+            model = message["model"]
+        usage = message.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        fields = {
+            "input": usage.get("input_tokens", 0) or 0,
+            "cache_read": usage.get("cache_read_input_tokens", 0) or 0,
+            "cache_creation": usage.get("cache_creation_input_tokens", 0) or 0,
+            "output": usage.get("output_tokens", 0) or 0,
+        }
+        last = fields
+        for key, value in fields.items():
+            totals[key] += value
+    return {"model": model, "last": last, "totals": totals}
+
+
 def last_assistant_snippet(loglines, max_length=280):
     """Whitespace-collapsed text of the last assistant text block, or None.
 
@@ -1840,6 +1889,7 @@ def build_card_data(
     recap,
     card_prompts,
     latest_link,
+    usage_detail=None,
 ):
     """Assemble the session-card payload shared by both static generators.
 
@@ -1864,6 +1914,7 @@ def build_card_data(
             "commits": total_commits,
         },
         "usage": usage,
+        "usage_detail": usage_detail,
         "recap": recap_obj,
         "prompts": card_prompts,
         "latest_link": latest_link,
@@ -2632,7 +2683,19 @@ CARD_CSS = """
 #session-card .card-close { background: transparent; border: none; cursor: pointer; font-size: 1.1rem; color: var(--text-muted); padding: 0 2px; line-height: 1; }
 #session-card .card-close:hover { color: var(--text-color); }
 #session-card .card-stats { color: var(--text-muted); margin-bottom: 6px; }
-#session-card .card-usage { color: var(--text-muted); margin-bottom: 8px; }
+#session-card .card-usage { color: var(--text-muted); margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#session-card .card-usage-toggle { background: transparent; border: none; cursor: pointer; color: var(--text-muted); font-size: 0.75rem; padding: 0; }
+#session-card .card-usage-toggle:hover { color: var(--text-color); }
+#session-card .card-usage-detail { margin-bottom: 8px; }
+#session-card .card-usage-model { font-family: monospace; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px; }
+#session-card .card-usage-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; color: var(--text-muted); }
+#session-card .card-usage-table th { text-align: right; font-weight: 600; padding: 1px 4px; }
+#session-card .card-usage-table td { padding: 1px 4px; }
+#session-card .card-usage-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+#session-card .ctx-bars { display: flex; align-items: flex-end; gap: 2px; height: 44px; margin-top: 4px; }
+#session-card .ctx-bar { flex: 1; height: 100%; display: flex; align-items: flex-end; cursor: pointer; background: rgba(0,0,0,0.04); border-radius: 2px; }
+#session-card .ctx-bar:hover { background: rgba(25, 118, 210, 0.12); }
+#session-card .ctx-bar-fill { width: 100%; background: var(--user-border); border-radius: 2px; }
 #session-card .card-section-label { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin: 8px 0 4px; }
 #session-card .card-recap-text { background: var(--thinking-bg); border-left: 3px solid var(--thinking-border); border-radius: 6px; padding: 8px 10px; }
 #session-card .card-prompt-list { margin: 0; padding-left: 22px; max-height: 32vh; overflow-y: auto; }
@@ -2656,6 +2719,7 @@ CARD_CSS = """
 CARD_JS = r"""
 (function () {
   var STORAGE_KEY = 'cct-card-expanded';
+  var USAGE_KEY = 'cct-usage-detail';
   var ICONS = { insight: '★', thinking: '💭', plan: '📋', completion: '✓' };
   var root = null;
   var refs = {};
@@ -2665,6 +2729,8 @@ CARD_JS = r"""
   var promptItems = {}; // num -> {li, toggle, sublist}
   var promptHrefs = {}; // num -> href (context bars + artifact fallbacks)
   var artifactByAnchor = {}; // anchor id -> {li, icon} for retype-in-place
+  var ctxSeries = {}; // prompt num -> context tokens (bars)
+  var usageDetail = null; // {model, last, totals}
 
   function el(tag, cls, text) {
     var e = document.createElement(tag);
@@ -2711,9 +2777,24 @@ CARD_JS = r"""
 
     refs.stats = el('div', 'card-stats', '');
     panel.appendChild(refs.stats);
-    refs.usage = el('div', 'card-usage', '');
+    refs.usage = el('div', 'card-usage');
     refs.usage.hidden = true;
+    refs.usageText = el('span', 'card-usage-text', '');
+    refs.usageToggle = el('button', 'card-usage-toggle', '▸ details');
+    refs.usageToggle.type = 'button';
+    refs.usageToggle.hidden = true; // shown when a breakdown exists
+    refs.usage.appendChild(refs.usageText);
+    refs.usage.appendChild(refs.usageToggle);
     panel.appendChild(refs.usage);
+    refs.usageDetail = el('div', 'card-usage-detail');
+    refs.usageDetail.hidden = true;
+    panel.appendChild(refs.usageDetail);
+    refs.usageToggle.addEventListener('click', function () {
+      var open = refs.usageDetail.hidden;
+      refs.usageDetail.hidden = !open;
+      refs.usageToggle.textContent = (open ? '▾' : '▸') + ' details';
+      try { localStorage.setItem(USAGE_KEY, open ? '1' : '0'); } catch (e) {}
+    });
 
     refs.recapWrap = el('div', 'card-recap');
     refs.recapWrap.hidden = true;
@@ -2781,9 +2862,87 @@ CARD_JS = r"""
     var parts = [];
     if (ctx) parts.push('Context ' + ctx);
     if (out) parts.push('Output ' + out);
-    refs.usage.textContent = parts.join(' · ');
+    refs.usageText.textContent = parts.join(' · ');
     refs.usage.hidden = false;
     updatePill();
+  }
+  function fmtNum(n) {
+    return n == null ? '—' : Number(n).toLocaleString();
+  }
+  function setUsageDetail(d) {
+    usageDetail = d && d.last ? d : null;
+    renderUsageDetail();
+  }
+  function renderUsageDetail() {
+    if (!refs.usageDetail) return;
+    if (!usageDetail) {
+      refs.usageToggle.hidden = true;
+      refs.usageDetail.hidden = true;
+      return;
+    }
+    refs.usageToggle.hidden = false;
+    refs.usageDetail.innerHTML = '';
+    if (usageDetail.model) {
+      refs.usageDetail.appendChild(
+        el('div', 'card-usage-model', usageDetail.model)
+      );
+    }
+    var table = el('table', 'card-usage-table');
+    var head = el('tr');
+    head.appendChild(el('th', null, ''));
+    head.appendChild(el('th', null, 'latest'));
+    head.appendChild(el('th', null, 'total'));
+    table.appendChild(head);
+    [
+      ['input', 'input'],
+      ['cache read', 'cache_read'],
+      ['cache create', 'cache_creation'],
+      ['output', 'output']
+    ].forEach(function (row) {
+      var tr = el('tr');
+      tr.appendChild(el('td', null, row[0]));
+      tr.appendChild(el('td', 'num', fmtNum(usageDetail.last ? usageDetail.last[row[1]] : null)));
+      tr.appendChild(el('td', 'num', fmtNum(usageDetail.totals ? usageDetail.totals[row[1]] : null)));
+      table.appendChild(tr);
+    });
+    refs.usageDetail.appendChild(table);
+    refs.usageDetail.appendChild(el('div', 'card-section-label', 'Context by prompt'));
+    refs.bars = el('div', 'ctx-bars');
+    refs.usageDetail.appendChild(refs.bars);
+    renderBars();
+    var open = false;
+    try { open = localStorage.getItem(USAGE_KEY) === '1'; } catch (e) {}
+    refs.usageDetail.hidden = !open;
+    refs.usageToggle.textContent = (open ? '▾' : '▸') + ' details';
+  }
+  function renderBars() {
+    if (!refs.bars) return;
+    refs.bars.innerHTML = '';
+    var nums = Object.keys(ctxSeries).map(Number);
+    if (!nums.length) return;
+    var max = 0;
+    nums.forEach(function (n) { if (ctxSeries[n] > max) max = ctxSeries[n]; });
+    var total = Math.max(statsState.prompts || 0, Math.max.apply(null, nums));
+    for (var n = 1; n <= total; n++) {
+      var bar = el('div', 'ctx-bar');
+      var v = ctxSeries[n];
+      var fill = el('div', 'ctx-bar-fill');
+      fill.style.height = v && max ? Math.max(8, Math.round((v / max) * 100)) + '%' : '0%';
+      bar.title = '#' + n + (v ? ' · ' + formatTokens(v) : '');
+      bar.appendChild(fill);
+      (function (num) {
+        bar.addEventListener('click', function () {
+          var href = promptHrefs[num];
+          if (href) location.href = href;
+        });
+      })(n);
+      refs.bars.appendChild(bar);
+    }
+  }
+  function recordContext(num, ctx) {
+    if (!num || ctx == null) return;
+    ctxSeries[num] = ctx;
+    renderBars();
   }
   function setRecap(text, isReal) {
     if (!refs.recapWrap || !text) return;
@@ -2866,10 +3025,13 @@ CARD_JS = r"""
     promptItems = {};
     promptHrefs = {};
     artifactByAnchor = {};
+    ctxSeries = {};
+    usageDetail = null;
     setStats({ prompts: 0, messages: 0, tool_calls: 0, commits: 0 });
     if (refs.usage) refs.usage.hidden = true;
     if (refs.recapWrap) refs.recapWrap.hidden = true;
     if (refs.promptList) refs.promptList.innerHTML = '';
+    renderUsageDetail();
   }
   function init(data) {
     if (!build()) return;
@@ -2878,6 +3040,12 @@ CARD_JS = r"""
     setTitle(data.title);
     setStats(data.stats);
     setUsage(data.usage);
+    if (data.usage_detail) {
+      (data.usage_detail.context_by_prompt || []).forEach(function (e) {
+        if (e && e.context_tokens != null) ctxSeries[e.num] = e.context_tokens;
+      });
+      setUsageDetail(data.usage_detail);
+    }
     if (data.recap && data.recap.text) {
       setRecap(data.recap.text, data.recap.source === 'recap');
     }
@@ -2887,7 +3055,8 @@ CARD_JS = r"""
 
   window.sessionCard = {
     init: init, reset: reset, setTitle: setTitle, setStats: setStats,
-    setUsage: setUsage, setRecap: setRecap, addPrompt: addPrompt,
+    setUsage: setUsage, setUsageDetail: setUsageDetail,
+    recordContext: recordContext, setRecap: setRecap, addPrompt: addPrompt,
     addArtifact: addArtifact, addChapter: addChapter, setPrompts: setPrompts,
     setLatestLink: setLatestLink
   };
@@ -3129,6 +3298,7 @@ def _render_session_pages(
     # Build timeline items: prompts and commits merged by timestamp
     timeline_items = []
     card_prompts = []
+    context_by_prompt = []
     pending_chapters = list(title_changes or ())
 
     # Add prompts
@@ -3190,6 +3360,9 @@ def _render_session_pages(
         # Analyze conversation for stats (excluding commits from inline display now)
         stats = analyze_conversation(all_messages)
         tool_stats_str = format_tool_stats(stats["tool_counts"])
+        context_by_prompt.append(
+            {"num": prompt_num, "context_tokens": stats["context_tokens"]}
+        )
 
         long_texts_html = ""
         for lt in stats["long_texts"]:
@@ -3234,6 +3407,8 @@ def _render_session_pages(
     else:
         latest_link = None
 
+    usage_detail = compute_usage_detail(loglines)
+    usage_detail["context_by_prompt"] = context_by_prompt
     card_data = build_card_data(
         title,
         prompt_num,
@@ -3244,6 +3419,7 @@ def _render_session_pages(
         recap,
         card_prompts,
         latest_link,
+        usage_detail=usage_detail,
     )
     # "</" must not appear raw inside a <script> block; "<\/" is the
     # equivalent JSON escape, preventing </script> breakout.

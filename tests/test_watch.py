@@ -22,6 +22,7 @@ from claude_code_transcripts import (
     resolve_active_session,
     create_live_server,
     compute_usage_totals,
+    compute_usage_detail,
     last_assistant_snippet,
     prompt_preview,
     cli,
@@ -779,6 +780,66 @@ class TestCardDataHelpers:
 
     def test_prompt_preview_short_text_unchanged(self):
         assert prompt_preview("fix the bug") == "fix the bug"
+
+    def test_usage_detail_model_latest_wins_and_breakdown(self):
+        loglines = [
+            self._user(),
+            {
+                "type": "assistant",
+                "timestamp": "T1",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-old-1",
+                    "content": [{"type": "text", "text": "one"}],
+                    "usage": {
+                        "input_tokens": 10,
+                        "cache_creation_input_tokens": 5,
+                        "cache_read_input_tokens": 100,
+                        "output_tokens": 7,
+                    },
+                },
+            },
+            {
+                "type": "assistant",
+                "timestamp": "T2",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-fable-5",
+                    "content": [{"type": "text", "text": "two"}],
+                    "usage": {
+                        "input_tokens": 1,
+                        "cache_creation_input_tokens": 2,
+                        "cache_read_input_tokens": 300,
+                        "output_tokens": 4,
+                    },
+                },
+            },
+        ]
+        detail = compute_usage_detail(loglines)
+        assert detail["model"] == "claude-fable-5"
+        assert detail["last"] == {
+            "input": 1,
+            "cache_read": 300,
+            "cache_creation": 2,
+            "output": 4,
+        }
+        assert detail["totals"] == {
+            "input": 11,
+            "cache_read": 400,
+            "cache_creation": 7,
+            "output": 11,
+        }
+
+    def test_usage_detail_no_usage_gives_null_last_zero_totals(self):
+        detail = compute_usage_detail([self._user(), self._assistant()])
+        assert detail["last"] is None
+        assert detail["model"] is None
+        assert detail["totals"] == {
+            "input": 0,
+            "cache_read": 0,
+            "cache_creation": 0,
+            "output": 0,
+        }
 
 
 class TestResolveActiveSession:
