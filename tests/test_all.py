@@ -1,6 +1,7 @@
 """Tests for batch conversion functionality."""
 
 import json
+import re
 import tempfile
 from pathlib import Path
 
@@ -558,13 +559,17 @@ class TestAllCommand:
 
 
 class TestFreshnessCheck:
-    """Tests for the --check and --if-stale freshness flags on the all command.
+    """Tests for incremental regeneration and the --check/--force flags.
 
     A session's output is "stale" when (a) no output exists yet, (b) its source
-    JSONL was modified after the recorded render time, or (c) the tool version
-    that produced the output differs from the currently installed version. A
-    sidecar `.cct-state.json` per session output dir captures the source mtime
-    and tool version recorded at render time.
+    JSONL was modified after the recorded render time, or (c) the render
+    fingerprint (tool version + a hash of the inlined CSS/JS and templates)
+    differs from the one recorded at render time — so a git-pinned install
+    that changes commits without changing its version string still
+    invalidates outputs. A sidecar `.cct-state.json` per session output dir
+    captures the source mtime and fingerprint recorded at render time.
+    Incremental is the DEFAULT; --force rebuilds everything; --if-stale is a
+    deprecated alias of the default.
     """
 
     def test_check_reports_zero_stale_immediately_after_full_run(
@@ -645,7 +650,8 @@ class TestFreshnessCheck:
     def test_check_reports_stale_when_tool_version_changes(
         self, mock_projects_dir, output_dir, monkeypatch
     ):
-        """Bumping the recorded tool version must flag every session stale."""
+        """Bumping the tool version changes the render fingerprint, flagging
+        every session stale."""
         runner = CliRunner()
         runner.invoke(
             cli,
@@ -677,8 +683,8 @@ class TestFreshnessCheck:
             ],
         )
         assert check.exit_code == 1
-        assert "tool version changed" in check.output
-        assert "-> 9.99-test" in check.output
+        assert "render fingerprint changed" in check.output
+        assert "9.99-test" in check.output
 
     def test_check_reports_all_stale_when_no_output_exists(
         self, mock_projects_dir, output_dir
@@ -739,6 +745,139 @@ class TestFreshnessCheck:
         assert check.exit_code == 1
         assert "abc123" in check.output
         assert "sidecar missing or malformed" in check.output
+
+    def test_default_run_is_incremental(self, mock_projects_dir, output_dir):
+        """A bare second run must skip fresh sessions — incremental is the
+        default; full rebuilds are opt-in via --force."""
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+
+        before = {
+            p: p.stat().st_mtime
+            for p in output_dir.rglob("*")
+            if p.is_file() and p.suffix == ".html"
+        }
+
+        second = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+            ],
+        )
+        assert second.exit_code == 0, second.output
+        assert "regenerated 0" in second.output
+        assert "skipped 3" in second.output
+
+        after = {
+            p: p.stat().st_mtime
+            for p in output_dir.rglob("*")
+            if p.is_file() and p.suffix == ".html"
+        }
+        assert set(before) == set(after)
+        for path, mtime in before.items():
+            assert after[path] == mtime, f"{path} was rewritten"
+
+    def test_force_rebuilds_fresh_sessions(self, mock_projects_dir, output_dir):
+        """--force must rewrite session HTML even when outputs are fresh."""
+        import time as _time
+
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+        target = output_dir / "project-a" / "abc123" / "index.html"
+        before = target.stat().st_mtime
+        _time.sleep(0.05)  # ensure a regenerated file gets a newer mtime
+
+        forced = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--force",
+                "--quiet",
+            ],
+        )
+        assert forced.exit_code == 0, forced.output
+        assert target.stat().st_mtime > before
+
+    def test_force_and_check_are_mutually_exclusive(
+        self, mock_projects_dir, output_dir
+    ):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--check",
+                "--force",
+            ],
+        )
+        assert result.exit_code == 2
+
+    def test_versiononly_sidecar_is_stale_once(self, mock_projects_dir, output_dir):
+        """Sidecars from before render fingerprinting (tool_version key only)
+        must read as stale so the output self-heals on the next run."""
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+        sidecar = output_dir / "project-a" / "abc123" / ".cct-state.json"
+        state = json.loads(sidecar.read_text(encoding="utf-8"))
+        state.pop("render_fingerprint", None)
+        state["tool_version"] = "0.6"
+        sidecar.write_text(json.dumps(state), encoding="utf-8")
+
+        check = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--check",
+            ],
+        )
+        assert check.exit_code == 1
+        assert "abc123" in check.output
 
     def test_if_stale_skips_fresh_sessions(self, mock_projects_dir, output_dir):
         """If everything is fresh, --if-stale must not rewrite any session HTML."""
@@ -957,6 +1096,388 @@ class TestFreshnessCheck:
         assert set(before) == set(after), "file set changed"
         for path in before:
             assert before[path] == after[path], f"{path} was modified by --check"
+
+
+class TestActivityWeeks:
+    """_activity_weeks: bucket session mtimes into trailing weekly counts for
+    the master index activity strips."""
+
+    NOW = 1_000_000_000.0
+    WEEK = 7 * 86400
+
+    def test_buckets_count_sessions_per_week(self):
+        from claude_code_transcripts import _activity_weeks
+
+        mtimes = [
+            self.NOW - 1,  # this week
+            self.NOW - 2,  # this week
+            self.NOW - self.WEEK - 1,  # last week
+        ]
+        weeks = _activity_weeks(mtimes, now=self.NOW, weeks=4)
+        assert weeks == [0, 0, 1, 2]  # oldest -> newest
+
+    def test_older_than_window_excluded(self):
+        from claude_code_transcripts import _activity_weeks
+
+        mtimes = [self.NOW - 5 * self.WEEK]
+        assert _activity_weeks(mtimes, now=self.NOW, weeks=4) == [0, 0, 0, 0]
+
+    def test_empty_input(self):
+        from claude_code_transcripts import _activity_weeks
+
+        assert _activity_weeks([], now=self.NOW, weeks=12) == [0] * 12
+
+    def test_future_mtimes_count_in_newest_week(self):
+        from claude_code_transcripts import _activity_weeks
+
+        # Clock skew / just-written files must not vanish from the strip.
+        weeks = _activity_weeks([self.NOW + 60], now=self.NOW, weeks=4)
+        assert weeks == [0, 0, 0, 1]
+
+
+class TestArchiveIndexes:
+    """The redesigned master/project indexes: search affordances and the
+    embedded session data that powers archive-wide search."""
+
+    def _build(self, mock_projects_dir, output_dir):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+    def test_master_index_has_search_and_data(self, mock_projects_dir, output_dir):
+        self._build(mock_projects_dir, output_dir)
+        html = (output_dir / "index.html").read_text(encoding="utf-8")
+        assert 'id="archive-search"' in html
+        assert 'id="archive-data"' in html
+        data_json = re.search(
+            r'<script id="archive-data" type="application/json">(.*?)</script>',
+            html,
+            re.DOTALL,
+        ).group(1)
+        data = json.loads(data_json)
+        stems = {s["stem"] for s in data["sessions"]}
+        assert {"abc123", "def456", "ghi789"} <= stems
+        entry = next(s for s in data["sessions"] if s["stem"] == "abc123")
+        assert entry["project"] == "project-a"
+        assert entry["title"] == "Hello from project A"
+        # No ai-title: summary IS the title, so it is omitted rather than
+        # rendered twice in search results.
+        assert entry["summary"] is None
+        assert "date" in entry
+
+    def test_master_index_rows_and_activity(self, mock_projects_dir, output_dir):
+        self._build(mock_projects_dir, output_dir)
+        html = (output_dir / "index.html").read_text(encoding="utf-8")
+        assert "project-a" in html and "project-b" in html
+        assert 'class="activity"' in html
+        # Fixture mtimes are write-time, so they land in the NEWEST week:
+        # project-a has 2 sessions (level 2), project-b has 1 (level 1).
+        # Wiring assertions must not be satisfiable by an all-zero strip.
+        assert html.count('class="cell"') == 24  # 12 weeks x 2 projects
+        assert 'data-level="2"' in html
+        assert 'data-level="1"' in html
+        assert 'title="2 sessions"' in html
+        # The search filter hides rows via the hidden attribute; the explicit
+        # display:flex on .ledger-row defeats the UA [hidden] rule without
+        # this override (caught live in the headless-Chrome smoke pass).
+        assert "[hidden] { display: none !important; }" in html
+
+    def test_embedded_json_is_script_safe(self, mock_projects_dir, output_dir):
+        """A session summary containing </script> must not break out of the
+        data block — '<' is unicode-escaped in the embedded JSON."""
+        evil = mock_projects_dir / "-home-user-projects-project-a" / "evil99.jsonl"
+        evil.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2025-01-03T10:00:00.000Z",
+                    "message": {
+                        "role": "user",
+                        # Mid-prose so the metadata scanner keeps it as a
+                        # summary (leading '<' reads as a command wrapper).
+                        "content": "explain </script><script>alert(1)</script> here",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self._build(mock_projects_dir, output_dir)
+        html = (output_dir / "index.html").read_text(encoding="utf-8")
+        data_json = re.search(
+            r'<script id="archive-data" type="application/json">(.*?)</script>',
+            html,
+            re.DOTALL,
+        ).group(1)
+        assert "</script>" not in data_json
+        data = json.loads(data_json)  # still valid JSON after escaping
+        assert any("alert(1)" in s["title"] for s in data["sessions"])
+
+    def test_project_index_has_search_and_row_data(self, mock_projects_dir, output_dir):
+        self._build(mock_projects_dir, output_dir)
+        html = (output_dir / "project-a" / "index.html").read_text(encoding="utf-8")
+        assert 'id="archive-search"' in html
+        assert "data-search=" in html
+        assert "abc123/index.html" in html
+
+    def _island(self, output_dir):
+        html = (output_dir / "index.html").read_text(encoding="utf-8")
+        return json.loads(
+            re.search(
+                r'<script id="archive-data" type="application/json">(.*?)</script>',
+                html,
+                re.DOTALL,
+            ).group(1)
+        )["sessions"]
+
+    def test_island_prefers_ai_title_and_truncates_summary(
+        self, mock_projects_dir, output_dir
+    ):
+        long_prompt = "investigate " + "x" * 180  # 192 chars, under the 200 cap
+        extra = mock_projects_dir / "-home-user-projects-project-a" / "titled1.jsonl"
+        extra.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2025-01-06T10:00:00.000Z",
+                    "message": {"role": "user", "content": long_prompt},
+                }
+            )
+            + "\n"
+            + json.dumps({"type": "ai-title", "aiTitle": "Sharp AI Title"})
+            + "\n",
+            encoding="utf-8",
+        )
+        self._build(mock_projects_dir, output_dir)
+
+        entry = next(s for s in self._island(output_dir) if s["stem"] == "titled1")
+        assert entry["title"] == "Sharp AI Title"
+        assert entry["summary"].startswith("investigate xxx")
+        assert len(entry["summary"]) <= 163  # truncated to 160 + "..."
+
+        # The project index leads with the AI title too.
+        proj = (output_dir / "project-a" / "index.html").read_text(encoding="utf-8")
+        assert ">Sharp AI Title</span>" in proj
+
+    def test_island_omits_summary_equal_to_title(self, mock_projects_dir, output_dir):
+        # No ai-title: the summary IS the title. Truncation must not make
+        # them look different, or master search results show the same text
+        # twice (full as the name, truncated as the sub-line).
+        long_prompt = "review " + "y" * 180
+        extra = mock_projects_dir / "-home-user-projects-project-a" / "plain99.jsonl"
+        extra.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2025-01-07T10:00:00.000Z",
+                    "message": {"role": "user", "content": long_prompt},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self._build(mock_projects_dir, output_dir)
+
+        entry = next(s for s in self._island(output_dir) if s["stem"] == "plain99")
+        assert entry["summary"] is None
+
+    def test_project_row_haystack_content(self, mock_projects_dir, output_dir):
+        # The data-search haystack is a build-time/run-time contract with
+        # ARCHIVE_JS, which lowercases the query before indexOf.
+        branchy = mock_projects_dir / "-home-user-projects-project-a" / "branchy1.jsonl"
+        branchy.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2025-01-08T10:00:00.000Z",
+                    "gitBranch": "DTI/Feature-X",
+                    "message": {"role": "user", "content": "Mixed Case Prompt"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self._build(mock_projects_dir, output_dir)
+        html = (output_dir / "project-a" / "index.html").read_text(encoding="utf-8")
+
+        haystacks = dict(
+            re.findall(r'href="([^"]+)/index.html"[^>]*data-search="([^"]*)"', html)
+        )
+        abc = haystacks["abc123"]
+        assert "abc123" in abc
+        assert "hello from project a" in abc  # lowercased summary words
+        assert re.search(r"\d{4}-\d{2}-\d{2}", abc)  # date participates
+
+        branchy_hay = haystacks["branchy1"]
+        assert "dti/feature-x" in branchy_hay  # lowercased branch
+        assert "DTI/Feature-X" not in branchy_hay
+        assert "mixed case prompt" in branchy_hay
+
+    def test_archive_js_id_contract(self, mock_projects_dir, output_dir):
+        # Every getElementById target in ARCHIVE_JS must exist on the master
+        # page (the JS null-guards, so a renamed id fails SILENTLY: search
+        # results just stop rendering). The project page carries the subset.
+        import claude_code_transcripts as cct
+
+        self._build(mock_projects_dir, output_dir)
+        js_ids = set(re.findall(r"getElementById\('([^']+)'\)", cct.ARCHIVE_JS))
+        assert js_ids == {
+            "archive-search",
+            "archive-data",
+            "session-results",
+            "session-results-list",
+            "archive-empty",
+        }
+        master = (output_dir / "index.html").read_text(encoding="utf-8")
+        for el_id in js_ids:
+            assert f'id="{el_id}"' in master, f"master index missing #{el_id}"
+        proj = (output_dir / "project-a" / "index.html").read_text(encoding="utf-8")
+        for el_id in ("archive-search", "archive-empty"):
+            assert f'id="{el_id}"' in proj, f"project index missing #{el_id}"
+
+
+class TestRenderFingerprint:
+    """_get_render_fingerprint ties freshness to the bytes of everything that
+    shapes rendered HTML — the module itself (render logic AND inlined
+    CSS/JS) plus packaged templates — not just the version string. Hashing
+    the whole module over-invalidates, which is the safe direction: the
+    earlier constants-only scan was blind to Python rendering changes (e.g.
+    this fork's markdown-engine swap), leaving archives silently stale."""
+
+    def test_stable_across_calls(self):
+        import claude_code_transcripts as cct
+
+        assert cct._get_render_fingerprint() == cct._get_render_fingerprint()
+
+    def test_includes_tool_version(self, monkeypatch):
+        import claude_code_transcripts as cct
+
+        monkeypatch.setattr(cct, "_get_tool_version", lambda: "9.99-test")
+        assert "9.99-test" in cct._get_render_fingerprint()
+
+    def test_sources_cover_module_and_all_templates(self):
+        import claude_code_transcripts as cct
+
+        sources = cct._render_fingerprint_sources()
+        names = {p.name for p in sources}
+        assert "__init__.py" in names  # Python render logic + CSS/JS constants
+        templates_dir = Path(cct.__file__).parent / "templates"
+        for f in templates_dir.rglob("*"):
+            if f.is_file():
+                assert f in sources, f"template {f.name} not fingerprinted"
+
+    def test_changes_when_any_source_file_changes(self, tmp_path, monkeypatch):
+        import claude_code_transcripts as cct
+
+        a = tmp_path / "module.py"
+        a.write_text("render logic v1", encoding="utf-8")
+        b = tmp_path / "template.html"
+        b.write_text("tpl v1", encoding="utf-8")
+        monkeypatch.setattr(cct, "_render_fingerprint_sources", lambda: [a, b])
+        monkeypatch.setattr(cct, "_RENDER_CONTENT_HASH", None)
+        baseline = cct._get_render_fingerprint()
+
+        b.write_text("tpl v2", encoding="utf-8")
+        monkeypatch.setattr(cct, "_RENDER_CONTENT_HASH", None)
+        after_template = cct._get_render_fingerprint()
+        assert after_template != baseline
+
+        a.write_text("render logic v2", encoding="utf-8")
+        monkeypatch.setattr(cct, "_RENDER_CONTENT_HASH", None)
+        assert cct._get_render_fingerprint() != after_template
+
+    def test_deterministic_across_processes(self):
+        """Tier 3 gate: the content hash is cached per process, so in-process
+        tests can't catch nondeterministic inputs (hash-seed-sensitive
+        ordering, mtimes). Incremental correctness rests on two SEPARATE
+        runs agreeing. Provenance: adversarial review 2026-06-11 —
+        PYTHONHASHSEED probe across fresh interpreters."""
+        import os
+        import subprocess
+        import sys
+
+        import claude_code_transcripts as cct
+
+        cmd = [
+            sys.executable,
+            "-c",
+            "import claude_code_transcripts as c; print(c._get_render_fingerprint())",
+        ]
+        outputs = set()
+        for seed in ("0", "42"):
+            env = dict(os.environ, PYTHONHASHSEED=seed)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, env=env, check=True
+            )
+            outputs.add(result.stdout.strip())
+        assert len(outputs) == 1
+        assert outputs.pop() == cct._get_render_fingerprint()
+
+
+class TestIndexScanState:
+    """Indexes must track the live scan even when no session is stale —
+    deletions (Claude Code prunes sessions after ~30 days) would otherwise
+    leave ghost entries forever under incremental-by-default."""
+
+    def _run(self, mock_projects_dir, output_dir, *extra):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+                *extra,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        return result
+
+    def test_deleted_session_leaves_indexes(self, mock_projects_dir, output_dir):
+        self._run(mock_projects_dir, output_dir)
+        (mock_projects_dir / "-home-user-projects-project-a" / "def456.jsonl").unlink()
+
+        self._run(mock_projects_dir, output_dir)  # incremental: 0 regenerated
+
+        project_html = (output_dir / "project-a" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        assert "def456" not in project_html
+        master_html = (output_dir / "index.html").read_text(encoding="utf-8")
+        assert "def456" not in master_html  # gone from the JSON island too
+
+    def test_deleted_project_leaves_master(self, mock_projects_dir, output_dir):
+        import shutil as _shutil
+
+        self._run(mock_projects_dir, output_dir)
+        _shutil.rmtree(mock_projects_dir / "-home-user-projects-project-b")
+
+        self._run(mock_projects_dir, output_dir)
+
+        master_html = (output_dir / "index.html").read_text(encoding="utf-8")
+        assert "project-b" not in master_html
+
+    def test_unchanged_scan_skips_index_rewrite(self, mock_projects_dir, output_dir):
+        self._run(mock_projects_dir, output_dir)
+        master = output_dir / "index.html"
+        before = master.stat().st_mtime
+
+        self._run(mock_projects_dir, output_dir)
+
+        assert master.stat().st_mtime == before  # nothing changed, no rewrite
 
 
 class TestJsonCommandWithUrl:
