@@ -1536,15 +1536,11 @@ class TestWatchCommand:
         assert "--pick" in result.output
         assert "--no-open" in result.output
 
-    def test_no_session_found_returns_without_serving(self, tmp_path):
-        # Empty source dir → nothing to tail → graceful early return (no hang).
-        result = CliRunner().invoke(cli, ["watch", "--source", str(tmp_path)])
-        assert result.exit_code == 0
-        assert "No active session" in result.output
-
-    def test_serves_resolved_newest_session(
+    def test_bare_watch_serves_session_index(
         self, tmp_path, monkeypatch, mock_webbrowser_open
     ):
+        # The default is the searchable web index — sessions are picked there,
+        # not auto-resolved to the newest file.
         _write_session(tmp_path / "p" / "live.jsonl", _user_line("hello"), 2000)
         monkeypatch.setattr(
             "claude_code_transcripts._LiveServer.serve_forever", lambda self: None
@@ -1553,8 +1549,52 @@ class TestWatchCommand:
         result = CliRunner().invoke(cli, ["watch", "--source", str(tmp_path)])
 
         assert result.exit_code == 0, result.output
+        assert "Session index at" in result.output
+        (url,) = mock_webbrowser_open
+        assert "http://127.0.0.1:" in url
+        assert "/session/" not in url  # opens the index, not a session
+
+    def test_empty_source_still_serves_index(self, tmp_path, monkeypatch):
+        # No sessions yet is fine — the index shows them as they appear.
+        monkeypatch.setattr(
+            "claude_code_transcripts._LiveServer.serve_forever", lambda self: None
+        )
+        result = CliRunner().invoke(cli, ["watch", "--source", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        assert "Session index at" in result.output
+
+    def test_session_flag_opens_directly(
+        self, tmp_path, monkeypatch, mock_webbrowser_open
+    ):
+        p = tmp_path / "p" / "live.jsonl"
+        _write_session(p, _user_line("hello"), 2000)
+        monkeypatch.setattr(
+            "claude_code_transcripts._LiveServer.serve_forever", lambda self: None
+        )
+
+        result = CliRunner().invoke(
+            cli, ["watch", "--source", str(tmp_path), "--session", str(p)]
+        )
+
+        assert result.exit_code == 0, result.output
         assert "live.jsonl" in result.output
-        assert any("http://127.0.0.1:" in url for url in mock_webbrowser_open)
+        assert "Session index at" in result.output  # index still served at /
+        (url,) = mock_webbrowser_open
+        assert "/session/live/" in url
+
+    def test_session_flag_missing_file_errors(self, tmp_path):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "watch",
+                "--source",
+                str(tmp_path),
+                "--session",
+                str(tmp_path / "nope.jsonl"),
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Session file not found" in result.output
 
     def test_no_open_skips_browser(self, tmp_path, monkeypatch, mock_webbrowser_open):
         _write_session(tmp_path / "p" / "live.jsonl", _user_line("hello"), 2000)

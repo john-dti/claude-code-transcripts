@@ -4189,12 +4189,12 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
 @click.option(
     "--session",
     type=click.Path(),
-    help="Tail a specific session file instead of the newest.",
+    help="Open straight into this session's live view.",
 )
 @click.option(
     "--pick",
     is_flag=True,
-    help="Choose the session from a list instead of auto-selecting the newest.",
+    help="Choose the session in the terminal instead of from the web index.",
 )
 @click.option(
     "--limit",
@@ -4228,13 +4228,16 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
     help="Seconds between file polls (default: 0.3).",
 )
 def watch_cmd(session, pick, limit, source, port, repo, open_browser, poll_interval):
-    """Tail an active Claude Code session live in your browser.
+    """Watch Claude Code sessions live in your browser.
 
-    Starts a local server and streams the session to the browser as Claude
-    writes it. With no options it tails the most-recently-modified session.
+    Serves a searchable index of your sessions at `/` — pick sessions there
+    to watch any number of them live, each in its own tab, and close active
+    watches from the index. --session and --pick jump straight into one
+    session's live view (the index stays available at `/`).
     """
     projects_folder = Path(source) if source else (Path.home() / ".claude" / "projects")
 
+    session_file = None
     if pick and not session:
         # Same rows as the `local` picker (branch/project/command columns).
         choices = build_session_choices(projects_folder, limit=limit)
@@ -4247,25 +4250,25 @@ def watch_cmd(session, pick, limit, source, port, repo, open_browser, poll_inter
         if session_file is None:
             click.echo("No session selected.")
             return
-    else:
-        session_file = resolve_active_session(projects_folder, session=session)
+    elif session:
+        session_file = Path(session)
+        if not session_file.exists():
+            click.echo(f"Session file not found: {session_file}")
+            return
 
-    if session_file is None:
-        click.echo("No active session found to watch.")
-        return
-    session_file = Path(session_file)
-    if not session_file.exists():
-        click.echo(f"Session file not found: {session_file}")
-        return
-
-    server = create_live_server(
-        session_file, port=port, repo=repo, poll_interval=poll_interval
+    server = create_watch_server(
+        projects_folder, port=port, repo=repo, poll_interval=poll_interval
     )
-    url = f"http://127.0.0.1:{server.server_address[1]}/"
-    click.echo(f"Watching {session_file}")
-    click.echo(f"Live at {url}  (press Ctrl-C to stop)")
+    index_url = f"http://127.0.0.1:{server.server_address[1]}/"
+    open_url = index_url
+    if session_file is not None:
+        sess = server.register_session(Path(session_file))
+        open_url = f"{index_url}session/{sess.id}/"
+        click.echo(f"Watching {session_file}")
+        click.echo(f"Live at {open_url}")
+    click.echo(f"Session index at {index_url}  (press Ctrl-C to stop)")
     if open_browser:
-        webbrowser.open(url)
+        webbrowser.open(open_url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
