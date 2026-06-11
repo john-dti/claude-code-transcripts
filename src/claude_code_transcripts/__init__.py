@@ -708,37 +708,50 @@ def _get_tool_version():
         return "unknown"
 
 
-# Cached hash of the render assets; composed with the tool version per call
+# Cached hash of the render sources; composed with the tool version per call
 # so monkeypatched versions in tests (and real upgrades) are always reflected.
 _RENDER_CONTENT_HASH = None
 
 
+def _render_fingerprint_sources():
+    """Files whose bytes define rendered output: this module (all render
+    logic plus the inlined CSS/JS constants) and every packaged template,
+    recursively."""
+    module = Path(__file__)
+    templates = sorted(
+        p for p in (module.parent / "templates").rglob("*") if p.is_file()
+    )
+    return [module] + templates
+
+
 def _get_render_fingerprint():
-    """Identity of everything that shapes rendered HTML: the tool version plus
-    a hash of the inlined CSS/JS constants and the packaged Jinja templates.
+    """Identity of everything that shapes rendered HTML: the tool version,
+    the bytes of this module and the packaged templates, and the markdown
+    engine's version (a dependency swap changes output too).
 
     Freshness checks compare this, not the bare version string: a git-pinned
-    install can move to a new commit (new CSS, new templates) without the
-    version changing, and outputs rendered under the old assets must read as
-    stale exactly once.
+    install can move to a new commit without the version changing, and
+    outputs rendered under the old code must read as stale exactly once.
+    Hashing the whole module over-invalidates — any code change rebuilds
+    every session — but over-invalidation is the safe direction for a cache
+    key: a constants-only scan was blind to Python rendering changes (e.g. a
+    markdown-pipeline fix), leaving archives silently stale.
     """
     global _RENDER_CONTENT_HASH
     if _RENDER_CONTENT_HASH is None:
         h = hashlib.sha1()
-        # Every module-level CSS/JS string constant, by naming convention —
-        # new constants (e.g. a future page's styles) are picked up without
-        # remembering to register them here.
-        for name in sorted(globals()):
-            if name in ("CSS", "JS") or name.endswith(("_CSS", "_JS")):
-                value = globals()[name]
-                if isinstance(value, str):
-                    h.update(name.encode("utf-8"))
-                    h.update(value.encode("utf-8"))
-        templates_dir = Path(__file__).parent / "templates"
-        for f in sorted(templates_dir.glob("*")):
-            if f.is_file():
-                h.update(f.name.encode("utf-8"))
-                h.update(f.read_bytes())
+        for path in _render_fingerprint_sources():
+            h.update(path.name.encode("utf-8"))
+            try:
+                h.update(path.read_bytes())
+            except OSError:
+                h.update(b"<unreadable>")
+        try:
+            from importlib.metadata import version as _dist_version
+
+            h.update(_dist_version("markdown-it-py").encode("utf-8"))
+        except Exception:
+            pass  # unknown engine version: covered by the module hash alone
         _RENDER_CONTENT_HASH = h.hexdigest()[:12]
     return f"{_get_tool_version()}+{_RENDER_CONTENT_HASH}"
 
@@ -868,6 +881,32 @@ def generate_batch_html(
     failed_sessions = []
     any_project_changed = False
 
+    # Indexes must track the live SCAN, not just session regeneration: a
+    # deleted source JSONL (Claude Code prunes old sessions) makes no session
+    # stale, yet its ghost entry must leave the project/master indexes. The
+    # root sidecar records what the indexes were last built from.
+    index_state_path = output_dir / ".cct-index-state.json"
+    index_state = {
+        "fingerprint": current_fingerprint or _get_render_fingerprint(),
+        # Sorted: membership is the signal. Ordering shifts come from mtime
+        # changes, which already regenerate via session staleness.
+        "scan": hashlib.sha1(
+            "\n".join(
+                sorted(
+                    f"{p['name']}/{s['path'].stem}"
+                    for p in projects
+                    for s in p["sessions"]
+                )
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+    try:
+        indexes_stale = (
+            json.loads(index_state_path.read_text(encoding="utf-8")) != index_state
+        )
+    except (OSError, json.JSONDecodeError):
+        indexes_stale = True
+
     for project in projects:
         project_dir = output_dir / project["name"]
         project_dir.mkdir(exist_ok=True)
@@ -919,18 +958,21 @@ def generate_batch_html(
                 )
 
         # In full-rebuild mode, always regenerate the per-project index. In
-        # incremental mode, only when this project actually had a regeneration
-        # — otherwise an unchanged project's index would be needlessly rewritten.
-        if not only_stale or project_changed:
+        # incremental mode, when this project had a regeneration OR the scan
+        # set / fingerprint moved since the indexes were last built.
+        if not only_stale or project_changed or indexes_stale:
             _generate_project_index(project, project_dir)
 
         if project_changed:
             any_project_changed = True
 
     # Master index re-renders on full rebuild always, or in incremental mode
-    # whenever any project changed (session counts/dates feed it).
-    if not only_stale or any_project_changed:
+    # whenever any project changed (session counts/dates feed it) or the
+    # scan set / fingerprint moved.
+    if not only_stale or any_project_changed or indexes_stale:
         _generate_master_index(projects, output_dir)
+
+    index_state_path.write_text(json.dumps(index_state), encoding="utf-8")
 
     stats = {
         "total_projects": len(projects),

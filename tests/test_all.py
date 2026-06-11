@@ -1223,8 +1223,12 @@ class TestArchiveIndexes:
 
 
 class TestRenderFingerprint:
-    """_get_render_fingerprint ties freshness to the actual render assets
-    (CSS/JS constants + packaged templates), not just the version string."""
+    """_get_render_fingerprint ties freshness to the bytes of everything that
+    shapes rendered HTML — the module itself (render logic AND inlined
+    CSS/JS) plus packaged templates — not just the version string. Hashing
+    the whole module over-invalidates, which is the safe direction: the
+    earlier constants-only scan was blind to Python rendering changes (e.g.
+    this fork's markdown-engine swap), leaving archives silently stale."""
 
     def test_stable_across_calls(self):
         import claude_code_transcripts as cct
@@ -1237,14 +1241,119 @@ class TestRenderFingerprint:
         monkeypatch.setattr(cct, "_get_tool_version", lambda: "9.99-test")
         assert "9.99-test" in cct._get_render_fingerprint()
 
-    def test_changes_when_render_assets_change(self, monkeypatch):
+    def test_sources_cover_module_and_all_templates(self):
         import claude_code_transcripts as cct
 
+        sources = cct._render_fingerprint_sources()
+        names = {p.name for p in sources}
+        assert "__init__.py" in names  # Python render logic + CSS/JS constants
+        templates_dir = Path(cct.__file__).parent / "templates"
+        for f in templates_dir.rglob("*"):
+            if f.is_file():
+                assert f in sources, f"template {f.name} not fingerprinted"
+
+    def test_changes_when_any_source_file_changes(self, tmp_path, monkeypatch):
+        import claude_code_transcripts as cct
+
+        a = tmp_path / "module.py"
+        a.write_text("render logic v1", encoding="utf-8")
+        b = tmp_path / "template.html"
+        b.write_text("tpl v1", encoding="utf-8")
+        monkeypatch.setattr(cct, "_render_fingerprint_sources", lambda: [a, b])
+        monkeypatch.setattr(cct, "_RENDER_CONTENT_HASH", None)
         baseline = cct._get_render_fingerprint()
-        monkeypatch.setattr(cct, "_RENDER_CONTENT_HASH", None)  # reset cache
-        monkeypatch.setattr(cct, "CSS", cct.CSS + "/* design tweak */")
-        changed = cct._get_render_fingerprint()
-        assert changed != baseline
+
+        b.write_text("tpl v2", encoding="utf-8")
+        monkeypatch.setattr(cct, "_RENDER_CONTENT_HASH", None)
+        after_template = cct._get_render_fingerprint()
+        assert after_template != baseline
+
+        a.write_text("render logic v2", encoding="utf-8")
+        monkeypatch.setattr(cct, "_RENDER_CONTENT_HASH", None)
+        assert cct._get_render_fingerprint() != after_template
+
+    def test_deterministic_across_processes(self):
+        """Tier 3 gate: the content hash is cached per process, so in-process
+        tests can't catch nondeterministic inputs (hash-seed-sensitive
+        ordering, mtimes). Incremental correctness rests on two SEPARATE
+        runs agreeing. Provenance: adversarial review 2026-06-11 —
+        PYTHONHASHSEED probe across fresh interpreters."""
+        import os
+        import subprocess
+        import sys
+
+        import claude_code_transcripts as cct
+
+        cmd = [
+            sys.executable,
+            "-c",
+            "import claude_code_transcripts as c; print(c._get_render_fingerprint())",
+        ]
+        outputs = set()
+        for seed in ("0", "42"):
+            env = dict(os.environ, PYTHONHASHSEED=seed)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, env=env, check=True
+            )
+            outputs.add(result.stdout.strip())
+        assert len(outputs) == 1
+        assert outputs.pop() == cct._get_render_fingerprint()
+
+
+class TestIndexScanState:
+    """Indexes must track the live scan even when no session is stale —
+    deletions (Claude Code prunes sessions after ~30 days) would otherwise
+    leave ghost entries forever under incremental-by-default."""
+
+    def _run(self, mock_projects_dir, output_dir, *extra):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+                *extra,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        return result
+
+    def test_deleted_session_leaves_indexes(self, mock_projects_dir, output_dir):
+        self._run(mock_projects_dir, output_dir)
+        (mock_projects_dir / "-home-user-projects-project-a" / "def456.jsonl").unlink()
+
+        self._run(mock_projects_dir, output_dir)  # incremental: 0 regenerated
+
+        project_html = (output_dir / "project-a" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        assert "def456" not in project_html
+        master_html = (output_dir / "index.html").read_text(encoding="utf-8")
+        assert "def456" not in master_html  # gone from the JSON island too
+
+    def test_deleted_project_leaves_master(self, mock_projects_dir, output_dir):
+        import shutil as _shutil
+
+        self._run(mock_projects_dir, output_dir)
+        _shutil.rmtree(mock_projects_dir / "-home-user-projects-project-b")
+
+        self._run(mock_projects_dir, output_dir)
+
+        master_html = (output_dir / "index.html").read_text(encoding="utf-8")
+        assert "project-b" not in master_html
+
+    def test_unchanged_scan_skips_index_rewrite(self, mock_projects_dir, output_dir):
+        self._run(mock_projects_dir, output_dir)
+        master = output_dir / "index.html"
+        before = master.stat().st_mtime
+
+        self._run(mock_projects_dir, output_dir)
+
+        assert master.stat().st_mtime == before  # nothing changed, no rewrite
 
 
 class TestJsonCommandWithUrl:
