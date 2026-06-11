@@ -13,6 +13,8 @@ from claude_code_transcripts import (
     scan_watch_sessions,
     new_watch_index_cache,
     render_content_block,
+    create_watch_server,
+    create_live_server,
 )
 
 from test_watch import (
@@ -165,3 +167,240 @@ class TestRenderRepoThreadLocal:
             assert "global/repo" not in results["html"]
         finally:
             cct._github_repo = old
+
+
+def _start_watch_server(folder, **kwargs):
+    """create_watch_server + serve in a daemon thread; returns (server, port, thread)."""
+    server = create_watch_server(folder, poll_interval=0.02, **kwargs)
+    port = server.server_address[1]
+    return server, port, _serve_in_thread(server)
+
+
+def _get_sessions_json(port):
+    r = httpx.get(f"http://127.0.0.1:{port}/api/sessions", timeout=5)
+    assert r.status_code == 200
+    return r.json()["sessions"]
+
+
+def _poll_until(fn, timeout=5.0):
+    """Re-evaluate `fn` until it returns truthy or the deadline passes."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = fn()
+        if result:
+            return result
+        time.sleep(0.02)
+    return fn()
+
+
+class TestWatchServerRouting:
+    """create_watch_server: index shell, sessions API, and per-session routes."""
+
+    def test_root_serves_searchable_index(self, tmp_path):
+        _write_session(tmp_path / "p" / "a.jsonl", _user_line("hello"), 1000)
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            r = httpx.get(f"http://127.0.0.1:{port}/", timeout=5)
+            assert r.status_code == 200
+            assert 'id="session-list"' in r.text
+            assert 'id="index-search"' in r.text
+            assert "api/sessions" in r.text  # the JS polls the sessions API
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_api_sessions_lists_rows(self, tmp_path):
+        data = _user_line("fix the bug") + _ai_title_line("Fixing the bug")
+        _write_session(tmp_path / "D--projects-devjig" / "abc.jsonl", data, 2000)
+        _write_session(tmp_path / "p" / "old.jsonl", _user_line("older"), 1000)
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            rows = _get_sessions_json(port)
+            assert [r["id"] for r in rows] == ["abc", "old"]
+            row = rows[0]
+            assert row["title"] == "Fixing the bug"
+            assert row["project"] == "devjig"
+            assert row["url"] == "/session/abc/"
+            assert row["watchers"] == 0
+            assert row["mtime"] == 2000 and row["size"] > 0
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_session_url_without_slash_redirects(self, tmp_path):
+        _write_session(tmp_path / "p" / "a.jsonl", _user_line("hello"), 1000)
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            r = httpx.get(f"http://127.0.0.1:{port}/session/a", timeout=5)
+            assert r.status_code in (301, 308)
+            assert r.headers["location"] == "/session/a/"
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_session_page_serves_live_shell_with_relative_events(self, tmp_path):
+        data = _user_line("hello") + _ai_title_line("My session")
+        _write_session(tmp_path / "p" / "a.jsonl", data, 1000)
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            r = httpx.get(f"http://127.0.0.1:{port}/session/a/", timeout=5)
+            assert r.status_code == 200
+            assert 'id="messages"' in r.text
+            assert "My session" in r.text
+            # Relative EventSource so the same shell works at any mount point.
+            assert "EventSource('events')" in r.text
+            assert "EventSource('/events')" not in r.text
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_unknown_session_404s(self, tmp_path):
+        (tmp_path / "p").mkdir(parents=True)
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            for url in ("/session/nope/", "/session/nope/events"):
+                r = httpx.get(f"http://127.0.0.1:{port}{url}", timeout=5)
+                assert r.status_code == 404
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_session_created_after_start_is_discovered(self, tmp_path):
+        (tmp_path / "p").mkdir(parents=True)
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            assert _get_sessions_json(port) == []
+            _write_session(tmp_path / "p" / "late.jsonl", _user_line("new"), 3000)
+            rows = _get_sessions_json(port)
+            assert [r["id"] for r in rows] == ["late"]
+            r = httpx.get(f"http://127.0.0.1:{port}/session/late/", timeout=5)
+            assert r.status_code == 200
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_legacy_single_session_server_keeps_old_routes(self, tmp_path):
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(_user_line("hello"))
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            r = httpx.get(f"http://127.0.0.1:{port}/", timeout=5)
+            assert r.status_code == 200
+            assert 'id="messages"' in r.text  # live shell, not the index
+            r = httpx.get(f"http://127.0.0.1:{port}/api/sessions", timeout=5)
+            assert r.status_code == 404
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+
+class TestWatchServerMultiSession:
+    """Concurrent SSE tails: each session streams its own file."""
+
+    def test_two_sessions_stream_independently(self, tmp_path):
+        _write_session(tmp_path / "p" / "aaa.jsonl", _user_line("alpha prompt"), 1000)
+        _write_session(tmp_path / "p" / "bbb.jsonl", _user_line("beta prompt"), 2000)
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            with (
+                httpx.stream(
+                    "GET", f"http://127.0.0.1:{port}/session/aaa/events", timeout=10
+                ) as ra,
+                httpx.stream(
+                    "GET", f"http://127.0.0.1:{port}/session/bbb/events", timeout=10
+                ) as rb,
+            ):
+                la, lb = ra.iter_lines(), rb.iter_lines()
+                eva = _collect_sse(la, lambda evs: any(ev == "stats" for ev, _ in evs))
+                evb = _collect_sse(lb, lambda evs: any(ev == "stats" for ev, _ in evs))
+                html_a = "".join(d["html"] for d in _data_for(eva, "append"))
+                html_b = "".join(d["html"] for d in _data_for(evb, "append"))
+                assert "alpha prompt" in html_a and "beta prompt" not in html_a
+                assert "beta prompt" in html_b and "alpha prompt" not in html_b
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+
+class TestWatchersAndClose:
+    """Watcher counts and closing a watched session from the index."""
+
+    def test_watcher_count_tracks_connections(self, tmp_path):
+        _write_session(tmp_path / "p" / "a.jsonl", _user_line("hello"), 1000)
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/session/a/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                _collect_sse(lines, lambda evs: any(ev == "stats" for ev, _ in evs))
+                rows = _poll_until(
+                    lambda: [r for r in _get_sessions_json(port) if r["watchers"] == 1]
+                )
+                assert rows and rows[0]["id"] == "a"
+            rows = _poll_until(
+                lambda: [r for r in _get_sessions_json(port) if r["watchers"] == 0]
+            )
+            assert rows and rows[0]["id"] == "a"
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_close_ends_stream_and_rearms(self, tmp_path):
+        _write_session(tmp_path / "p" / "a.jsonl", _user_line("hello"), 1000)
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/session/a/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                _collect_sse(lines, lambda evs: any(ev == "stats" for ev, _ in evs))
+                r = httpx.post(
+                    f"http://127.0.0.1:{port}/api/sessions/a/close", timeout=5
+                )
+                assert r.status_code == 200
+                events = _collect_sse(
+                    lines, lambda evs: any(ev == "closed" for ev, _ in evs)
+                )
+                assert any(ev == "closed" for ev, _ in events)
+                # Stream actually ends: draining completes instead of hanging
+                # (an unclosed stream would block until the httpx read timeout).
+                remaining = list(lines)
+                assert all(ln == "" or ln.startswith(":") for ln in remaining)
+            # Close re-arms: a new watcher connects and streams normally.
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/session/a/events", timeout=10
+            ) as resp2:
+                events = _collect_sse(
+                    resp2.iter_lines(),
+                    lambda evs: any(ev == "stats" for ev, _ in evs),
+                )
+                assert any(ev == "reset" for ev, _ in events)
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_close_unknown_session_404s(self, tmp_path):
+        (tmp_path / "p").mkdir(parents=True)
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            r = httpx.post(
+                f"http://127.0.0.1:{port}/api/sessions/nope/close", timeout=5
+            )
+            assert r.status_code == 404
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
