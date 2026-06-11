@@ -377,6 +377,22 @@ def build_session_choices(folder, limit=10):
 # Module-level variable for GitHub repo (set by generate_html)
 _github_repo = None
 
+# Per-thread override of _github_repo. The live watch server renders sessions
+# from different repos on concurrent handler threads; a shared global would
+# let one session's repo leak into another's commit links.
+_render_repo_local = threading.local()
+
+
+def _set_render_repo(repo):
+    """Pin the GitHub repo used for commit links on THIS thread (None = no repo)."""
+    _render_repo_local.value = repo
+
+
+def _current_github_repo():
+    """The repo for commit links: this thread's override if set, else the global."""
+    return getattr(_render_repo_local, "value", _github_repo)
+
+
 # API constants
 API_BASE_URL = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"
@@ -605,6 +621,71 @@ def find_all_sessions(folder, include_agents=False):
     )
 
     return result
+
+
+def new_watch_index_cache():
+    """A fresh metadata cache for scan_watch_sessions (path -> cached row)."""
+    return {}
+
+
+def scan_watch_sessions(folder, cache=None):
+    """Flat, mtime-descending list of watchable sessions under `folder`.
+
+    Returns dicts of {path, project, title, summary, branch, command, mtime,
+    size}. Excludes agent-* files and warmup sessions but KEEPS "(no summary)"
+    sessions — a just-started session is exactly what a live watcher wants.
+
+    `cache` (from new_watch_index_cache()) makes repeated scans cheap: the
+    full-file metadata pass is skipped for files whose (mtime, size) signature
+    is unchanged, so a polling index costs one glob + stat per refresh.
+    """
+    folder = Path(folder)
+    if cache is None:
+        cache = {}
+    if not folder.exists():
+        cache.clear()
+        return []
+    rows = []
+    seen_keys = set()
+    for f in folder.glob("**/*.jsonl"):
+        if f.name.startswith("agent-"):
+            continue
+        try:
+            stat = f.stat()
+        except OSError:
+            continue
+        key = str(f)
+        seen_keys.add(key)
+        sig = (stat.st_mtime, stat.st_size)
+        entry = cache.get(key)
+        if entry is None or entry["sig"] != sig:
+            meta = scan_session_metadata(f)
+            entry = {
+                "sig": sig,
+                "title": meta.title,
+                "summary": meta.summary,
+                "branch": meta.branch,
+                "command": meta.command,
+            }
+            cache[key] = entry
+        if entry["summary"].lower() == "warmup":
+            continue
+        rows.append(
+            {
+                "path": f,
+                "project": get_project_display_name(f.parent.name),
+                "title": entry["title"],
+                "summary": entry["summary"],
+                "branch": entry["branch"],
+                "command": entry["command"],
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+            }
+        )
+    for stale in set(cache) - seen_keys:
+        del cache[stale]
+    rows.sort(key=lambda r: r["mtime"], reverse=True)
+    return rows
 
 
 def _get_tool_version():
@@ -1408,7 +1489,9 @@ def render_content_block(block, block_id=None):
                     commit_hash = match.group(1)
                     commit_msg = match.group(2)
                     parts.append(
-                        _macros.commit_card(commit_hash, commit_msg, _github_repo)
+                        _macros.commit_card(
+                            commit_hash, commit_msg, _current_github_repo()
+                        )
                     )
                     last_end = match.end()
 
@@ -3471,7 +3554,7 @@ def _render_session_pages(
     # Add commits as separate timeline items
     for commit_ts, commit_hash, commit_msg, page_num, conv_idx in all_commits:
         item_html = _macros.index_commit(
-            commit_hash, commit_msg, commit_ts, _github_repo
+            commit_hash, commit_msg, commit_ts, _current_github_repo()
         )
         timeline_items.append((commit_ts, "commit", item_html))
 
