@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block title %}Claude Code sessions (live){% endblock %}
+
+{% block content %}
+        <div class="live-header">
+            <h1>Claude Code sessions</h1>
+            <span id="index-status" class="live-status down">● connecting…</span>
+        </div>
+        <div class="watch-search">
+            <input type="search" id="index-search" placeholder="Search title, summary, project, branch…" autocomplete="off">
+        </div>
+        <p id="index-count" class="stats-bar"></p>
+        <div id="session-list"></div>
+{%- endblock %}

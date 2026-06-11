@@ -96,32 +96,34 @@ claude-code-transcripts local --limit 20
 
 ### Live tailing
 
-The `watch` command streams an **in-progress** session into your browser in real time — a `tail -f` with the same rich rendering as the static pages. It starts a small local server, opens your browser, and pushes each new message (via [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)) as Claude appends it to the session file. A running stats bar (prompts, messages, tool calls, commits) and a clickable list of prompts update live as the session grows.
+The `watch` command streams **in-progress** sessions into your browser in real time — a `tail -f` with the same rich rendering as the static pages. It starts a small local server, opens your browser, and pushes each new message (via [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)) as Claude appends it to the session file. A running stats bar (prompts, messages, tool calls, commits) and a clickable list of prompts update live as the session grows.
 
 ```bash
-# Tail the most-recently-modified session (the one you're actively working in)
+# Open the live session index and pick sessions to watch from there
 claude-code-transcripts watch
 ```
 
-By default it picks the newest session under `~/.claude/projects`. Other ways to choose:
+The index at `/` lists every session under `~/.claude/projects`, newest first, with a search box that filters by title, summary, project, branch, and slash command as you type. It refreshes itself every few seconds, so new sessions appear as they start and recently-active ones carry an `● active` marker. Click a session to watch it live in a new tab — open as many as you like; each tab streams independently. Sessions with live watchers show an `● watching` badge and a `✕ close` button that stops their streams (the watching tabs say `● closed` and stop reconnecting; re-open from the index any time).
+
+To jump straight into one session's live view (the index stays available at `/`):
 
 ```bash
-# Choose from a list instead of auto-selecting the newest
+# Choose in the terminal instead of the web index
 claude-code-transcripts watch --pick
 
-# Tail a specific session file
+# Watch a specific session file
 claude-code-transcripts watch --session ~/.claude/projects/my-project/abc123.jsonl
 ```
 
 Options:
 
-- `--session PATH` - tail a specific session file instead of the newest
-- `--pick` - choose the session from a list instead of auto-selecting the newest. The picker shows the same columns as `local` (date, size, git branch, project, slash command, summary).
+- `--session PATH` - open straight into this session's live view
+- `--pick` - choose the session in the terminal instead of from the web index. The picker shows the same columns as `local` (date, size, git branch, project, slash command, summary).
 - `--limit N` - maximum sessions to show with `--pick` (default: 10)
 - `-s, --source DIRECTORY` - projects folder to search (default: `~/.claude/projects`)
 - `--port N` - port to serve on (default: an OS-assigned free port)
-- `--repo OWNER/NAME` - GitHub repo for commit links (auto-detected if not specified)
-- `--open` / `--no-open` - open the live view in your browser (default: open)
+- `--repo OWNER/NAME` - GitHub repo for commit links, applied to every session (auto-detected per session if not specified)
+- `--open` / `--no-open` - open the browser (default: open)
 - `--poll-interval SECONDS` - how often to check the file for new lines (default: 0.3)
 
 Press `Ctrl-C` to stop the server. The page reconnects automatically and re-syncs if the session file is rewritten (for example when Claude compacts it).

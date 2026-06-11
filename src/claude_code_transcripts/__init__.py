@@ -1,5 +1,6 @@
 """Convert Claude Code session JSON to a clean mobile-friendly HTML page with pagination."""
 
+import hashlib
 import json
 import html
 import os
@@ -14,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote, unquote, urlsplit
 
 import click
 from click_default_group import DefaultGroup
@@ -377,6 +379,22 @@ def build_session_choices(folder, limit=10):
 # Module-level variable for GitHub repo (set by generate_html)
 _github_repo = None
 
+# Per-thread override of _github_repo. The live watch server renders sessions
+# from different repos on concurrent handler threads; a shared global would
+# let one session's repo leak into another's commit links.
+_render_repo_local = threading.local()
+
+
+def _set_render_repo(repo):
+    """Pin the GitHub repo used for commit links on THIS thread (None = no repo)."""
+    _render_repo_local.value = repo
+
+
+def _current_github_repo():
+    """The repo for commit links: this thread's override if set, else the global."""
+    return getattr(_render_repo_local, "value", _github_repo)
+
+
 # API constants
 API_BASE_URL = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"
@@ -605,6 +623,71 @@ def find_all_sessions(folder, include_agents=False):
     )
 
     return result
+
+
+def new_watch_index_cache():
+    """A fresh metadata cache for scan_watch_sessions (path -> cached row)."""
+    return {}
+
+
+def scan_watch_sessions(folder, cache=None):
+    """Flat, mtime-descending list of watchable sessions under `folder`.
+
+    Returns dicts of {path, project, title, summary, branch, command, mtime,
+    size}. Excludes agent-* files and warmup sessions but KEEPS "(no summary)"
+    sessions — a just-started session is exactly what a live watcher wants.
+
+    `cache` (from new_watch_index_cache()) makes repeated scans cheap: the
+    full-file metadata pass is skipped for files whose (mtime, size) signature
+    is unchanged, so a polling index costs one glob + stat per refresh.
+    """
+    folder = Path(folder)
+    if cache is None:
+        cache = {}
+    if not folder.exists():
+        cache.clear()
+        return []
+    rows = []
+    seen_keys = set()
+    for f in folder.glob("**/*.jsonl"):
+        if f.name.startswith("agent-"):
+            continue
+        try:
+            stat = f.stat()
+        except OSError:
+            continue
+        key = str(f)
+        seen_keys.add(key)
+        sig = (stat.st_mtime, stat.st_size)
+        entry = cache.get(key)
+        if entry is None or entry["sig"] != sig:
+            meta = scan_session_metadata(f)
+            entry = {
+                "sig": sig,
+                "title": meta.title,
+                "summary": meta.summary,
+                "branch": meta.branch,
+                "command": meta.command,
+            }
+            cache[key] = entry
+        if entry["summary"].lower() == "warmup":
+            continue
+        rows.append(
+            {
+                "path": f,
+                "project": get_project_display_name(f.parent.name),
+                "title": entry["title"],
+                "summary": entry["summary"],
+                "branch": entry["branch"],
+                "command": entry["command"],
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+            }
+        )
+    for stale in set(cache) - seen_keys:
+        del cache[stale]
+    rows.sort(key=lambda r: r["mtime"], reverse=True)
+    return rows
 
 
 def _get_tool_version():
@@ -1408,7 +1491,9 @@ def render_content_block(block, block_id=None):
                     commit_hash = match.group(1)
                     commit_msg = match.group(2)
                     parts.append(
-                        _macros.commit_card(commit_hash, commit_msg, _github_repo)
+                        _macros.commit_card(
+                            commit_hash, commit_msg, _current_github_repo()
+                        )
                     )
                     last_end = match.end()
 
@@ -2174,9 +2259,21 @@ LIVE_JS = r"""
   }
   function setCount(id, n) { var el = document.getElementById(id); if (el) el.textContent = n; }
 
-  var es = new EventSource('/events');
+  // Relative URL: resolves to /events on the legacy single-session server
+  // and to /session/<id>/events when mounted under a session path (which is
+  // why session URLs are canonicalized with a trailing slash).
+  var es = new EventSource('events');
   es.addEventListener('open', function () { setStatus(true); });
   es.addEventListener('error', function () { setStatus(false); });
+  es.addEventListener('closed', function () {
+    // Watch closed from the session index: stop reconnecting. Reload the
+    // page (or re-open from the index) to start watching again.
+    es.close();
+    if (statusEl) {
+      statusEl.textContent = '● closed';
+      statusEl.className = 'live-status down';
+    }
+  });
 
   es.addEventListener('reset', function () {
     if (messages) messages.innerHTML = '';
@@ -2252,20 +2349,220 @@ LIVE_JS = r"""
 })();
 """
 
+# Styles for the watch index page only (appended to CSS + LIVE_CSS, which
+# already provide .index-item and the live-status states).
+INDEX_CSS = """
+.watch-search { margin: 0 0 12px; }
+.watch-search input { width: 100%; padding: 10px 14px; font-size: 1rem; border: 1px solid #ccc; border-radius: 8px; background: var(--card-bg); color: var(--text-color); }
+.watch-when { color: var(--text-muted); font-size: 0.85rem; white-space: nowrap; }
+.watch-active { color: #2e7d32; }
+.watch-summary { margin-bottom: 4px; }
+.watch-meta { color: var(--text-muted); font-size: 0.85rem; }
+.watch-actions { display: flex; align-items: center; gap: 10px; padding: 6px 16px; border-top: 1px solid rgba(0,0,0,0.06); }
+.watch-badge { color: #2e7d32; font-size: 0.85rem; font-weight: 600; }
+.watch-close-btn { background: transparent; border: 1px solid #ef9a9a; color: #b71c1c; border-radius: 6px; padding: 2px 10px; cursor: pointer; font-size: 0.85rem; }
+.watch-close-btn:hover { background: #ffebee; }
+.watch-empty { color: var(--text-muted); padding: 24px 0; text-align: center; }
+"""
+
+# The watch index client: polls api/sessions, renders searchable rows, opens
+# sessions in new tabs, and closes active watches. All user-controlled text
+# goes through textContent so it is never parsed as HTML.
+INDEX_JS = r"""
+(function () {
+  var listEl = document.getElementById('session-list');
+  var searchEl = document.getElementById('index-search');
+  var statusEl = document.getElementById('index-status');
+  var countEl = document.getElementById('index-count');
+  var sessions = [];
+
+  function fmtAge(mtime) {
+    var s = Math.max(0, Date.now() / 1000 - mtime);
+    if (s < 60) return Math.round(s) + 's ago';
+    if (s < 3600) return Math.round(s / 60) + 'm ago';
+    if (s < 86400) return Math.round(s / 3600) + 'h ago';
+    return Math.round(s / 86400) + 'd ago';
+  }
+  function setStatus(ok, text) {
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.className = 'live-status ' + (ok ? 'live' : 'down');
+  }
+  function rowMatches(s, q) {
+    if (!q) return true;
+    return [s.title, s.summary, s.project, s.branch, s.command]
+      .filter(Boolean).join(' ').toLowerCase().indexOf(q) !== -1;
+  }
+  function closeSession(id) {
+    fetch('api/sessions/' + encodeURIComponent(id) + '/close', { method: 'POST' })
+      // The stream loops notice the close within one poll interval; refresh
+      // shortly after so the watching badge clears on the first repaint.
+      .then(function () { setTimeout(refresh, 600); });
+  }
+
+  function render() {
+    if (!listEl) return;
+    var q = ((searchEl && searchEl.value) || '').trim().toLowerCase();
+    listEl.innerHTML = '';
+    var shown = 0;
+    sessions.forEach(function (s) {
+      if (!rowMatches(s, q)) return;
+      shown += 1;
+      var item = document.createElement('div');
+      item.className = 'index-item';
+
+      var a = document.createElement('a');
+      a.href = s.url;
+      a.target = '_blank'; // keep the index open; each session gets a tab
+      a.rel = 'noopener';
+
+      var header = document.createElement('div');
+      header.className = 'index-item-header';
+      var titleEl = document.createElement('span');
+      titleEl.className = 'index-item-number';
+      titleEl.textContent = s.title || '(untitled)';
+      var when = document.createElement('span');
+      when.className = 'watch-when';
+      var active = (Date.now() / 1000 - s.mtime) < 300;
+      when.textContent = (active ? '● active · ' : '') +
+        fmtAge(s.mtime) + ' · ' + Math.round(s.size / 1024) + ' KB';
+      if (active) when.classList.add('watch-active');
+      header.appendChild(titleEl);
+      header.appendChild(when);
+
+      var content = document.createElement('div');
+      content.className = 'index-item-content';
+      if (s.summary && s.summary !== s.title) {
+        var sum = document.createElement('div');
+        sum.className = 'watch-summary';
+        sum.textContent = s.summary;
+        content.appendChild(sum);
+      }
+      var meta = document.createElement('div');
+      meta.className = 'watch-meta';
+      meta.textContent = [s.project, s.branch && '[' + s.branch + ']', s.command]
+        .filter(Boolean).join(' · ');
+      content.appendChild(meta);
+
+      a.appendChild(header);
+      a.appendChild(content);
+      item.appendChild(a);
+
+      if (s.watchers > 0) {
+        var actions = document.createElement('div');
+        actions.className = 'watch-actions';
+        var badge = document.createElement('span');
+        badge.className = 'watch-badge';
+        badge.textContent = '● watching' + (s.watchers > 1 ? ' ×' + s.watchers : '');
+        var btn = document.createElement('button');
+        btn.className = 'watch-close-btn';
+        btn.textContent = '✕ close';
+        btn.title = 'Stop streaming this session in every open tab';
+        btn.addEventListener('click', function () { closeSession(s.id); });
+        actions.appendChild(badge);
+        actions.appendChild(btn);
+        item.appendChild(actions);
+      }
+      listEl.appendChild(item);
+    });
+    if (!shown) {
+      var empty = document.createElement('p');
+      empty.className = 'watch-empty';
+      empty.textContent = sessions.length
+        ? 'No sessions match the search.'
+        : 'No sessions yet — start a Claude Code conversation and it will appear here.';
+      listEl.appendChild(empty);
+    }
+    if (countEl) {
+      countEl.textContent = q
+        ? shown + ' of ' + sessions.length + ' sessions'
+        : sessions.length + ' sessions';
+    }
+  }
+
+  // Re-render only when the data changed (or on the slow tick, so the age
+  // labels stay roughly current): an unconditional 3s repaint would tear
+  // down rows out from under an in-flight click.
+  var lastPayload = null;
+  var lastRenderAt = 0;
+  function refresh() {
+    fetch('api/sessions')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        sessions = data.sessions || [];
+        setStatus(true, '● live');
+        var payload = JSON.stringify(sessions);
+        var stale = Date.now() - lastRenderAt > 30000;
+        if (payload !== lastPayload || stale) {
+          lastPayload = payload;
+          lastRenderAt = Date.now();
+          render();
+        }
+      })
+      .catch(function () { setStatus(false, '● reconnecting…'); });
+  }
+
+  if (searchEl) searchEl.addEventListener('input', render);
+  refresh();
+  setInterval(refresh, 3000);
+})();
+"""
+
+
+class _WatchedSession:
+    """Registry entry for one watchable session file."""
+
+    def __init__(self, session_id, path):
+        self.id = session_id
+        self.path = Path(path)
+        self.repo = None
+        self.repo_resolved = False
+        # Latched close signal: close_session() sets it; loading the session
+        # page (_serve_shell) re-arms it with a fresh Event. SSE loops snapshot
+        # it at connect time, so a connection that arrives while the latch is
+        # set is told 'closed' immediately instead of streaming.
+        self.close_event = threading.Event()
+        self.watchers = 0
+
 
 class _LiveServer(ThreadingHTTPServer):
-    """Threaded HTTP server that tails one session file. One handler thread per
-    connected browser tab; daemon threads so Ctrl-C/shutdown never hangs."""
+    """Threaded HTTP server for live session tails. One handler thread per
+    connected browser tab; daemon threads so Ctrl-C/shutdown never hangs.
+
+    Two modes share the class:
+    - watch-index mode (``projects_folder`` set): ``/`` serves a searchable
+      session index and every session streams at ``/session/<id>/``.
+    - legacy single-session mode (``session_file`` set, via
+      create_live_server): ``/`` is that session's live shell and ``/events``
+      its SSE tail.
+    """
 
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, server_address, handler, session_file, repo, poll_interval):
+    def __init__(
+        self,
+        server_address,
+        handler,
+        repo=None,
+        poll_interval=0.3,
+        projects_folder=None,
+        session_file=None,
+    ):
         super().__init__(server_address, handler)
-        self.session_file = Path(session_file)
-        self.repo = repo
+        self.repo = repo  # CLI override; applies to every session when set
         self.poll_interval = poll_interval
+        self.projects_folder = Path(projects_folder) if projects_folder else None
         self.stop_event = threading.Event()
+        self.sessions = {}  # session id -> _WatchedSession
+        self._sessions_by_path = {}  # str(path) -> _WatchedSession
+        self.sessions_lock = threading.Lock()
+        self.scan_lock = threading.Lock()
+        self.index_cache = new_watch_index_cache()
+        self.default_session_id = None
+        if session_file is not None:
+            self.session_file = Path(session_file)  # legacy attribute
+            self.default_session_id = self.register_session(session_file).id
 
     def shutdown(self):
         # Signal handler poll-loops to exit first, then stop serve_forever.
@@ -2273,57 +2570,255 @@ class _LiveServer(ThreadingHTTPServer):
         self.stop_event.set()
         super().shutdown()
 
+    def register_session(self, path):
+        """Idempotently register a session file; returns its _WatchedSession.
+
+        IDs are the file stem; a same-stem file from a different project gets
+        a deterministic path-hash suffix. The registry owns ID assignment so
+        session URLs stay stable across rescans.
+        """
+        # Resolve so a relative --session path and the folder scan's absolute
+        # path land on the same entry (else close-from-index misses one).
+        path = Path(path).resolve()
+        with self.sessions_lock:
+            sess = self._sessions_by_path.get(str(path))
+            if sess is not None:
+                return sess
+            session_id = path.stem
+            if session_id in self.sessions:
+                digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:8]
+                session_id = f"{path.stem}~{digest}"
+            sess = _WatchedSession(session_id, path)
+            self.sessions[session_id] = sess
+            self._sessions_by_path[str(path)] = sess
+            return sess
+
+    def get_session(self, session_id):
+        with self.sessions_lock:
+            sess = self.sessions.get(session_id)
+        if sess is None and self.projects_folder is not None:
+            # Maybe it was created after the last scan — refresh once.
+            self.refresh_sessions()
+            with self.sessions_lock:
+                sess = self.sessions.get(session_id)
+        return sess
+
+    def default_session(self):
+        with self.sessions_lock:
+            return self.sessions.get(self.default_session_id)
+
+    def refresh_sessions(self):
+        """Rescan the projects folder; returns index rows with id + watchers."""
+        if self.projects_folder is None:
+            return []
+        with self.scan_lock:
+            # scan_lock serializes cache mutation; concurrent API polls would
+            # otherwise race inside the shared index_cache dict.
+            rows = scan_watch_sessions(self.projects_folder, cache=self.index_cache)
+        for row in rows:
+            sess = self.register_session(row["path"])
+            row["id"] = sess.id
+            with self.sessions_lock:
+                row["watchers"] = sess.watchers
+        return rows
+
+    def session_repo(self, sess):
+        """Commit-link repo for a session: CLI override, else detected once
+        from the session's own loglines (full parse, cached on the entry)."""
+        if self.repo is not None:
+            return self.repo
+        if not sess.repo_resolved:
+            try:
+                sess.repo = detect_github_repo(
+                    parse_session_file(sess.path).get("loglines", [])
+                )
+            except Exception:
+                sess.repo = None
+            sess.repo_resolved = True
+        return sess.repo
+
+    def close_session(self, session_id):
+        """Stop every watcher of a session. The close LATCHES: bare /events
+        reconnects (an orphaned tab's EventSource auto-retry) keep receiving
+        'closed' until the session page is loaded again — _serve_shell is the
+        deliberate re-open that re-arms the event."""
+        with self.sessions_lock:
+            sess = self.sessions.get(session_id)
+            if sess is None:
+                return False
+            event = sess.close_event
+        event.set()
+        return True
+
+
+_SESSION_PATH_RE = re.compile(r"^/session/([^/]+)(/events|/)?$")
+_CLOSE_PATH_RE = re.compile(r"^/api/sessions/([^/]+)/close$")
+
+# The server binds 127.0.0.1, but binding alone doesn't authenticate the
+# REQUESTER: a malicious page can reach loopback via DNS rebinding (Host) or
+# fire cross-site POSTs (Origin), and /api/sessions exposes transcript titles.
+_ALLOWED_REQUEST_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+
+
+def _header_hostname(value):
+    """Hostname of a Host header or Origin URL, lowercased; None if unparsable."""
+    try:
+        if "//" not in value:
+            value = "//" + value
+        return urlsplit(value).hostname
+    except ValueError:
+        return None
+
 
 class _LiveHandler(BaseHTTPRequestHandler):
-    """Serves the live shell at `/` and a Server-Sent Events tail at `/events`."""
+    """Routes: `/` (index or legacy shell), `/api/sessions`,
+    `/session/<id>/` + `/session/<id>/events`, and legacy `/events`."""
 
     def log_message(self, format, *args):  # noqa: A002 - keep the CLI output clean
         pass
 
+    def _request_blocked(self):
+        """True for DNS-rebinding (foreign Host) or cross-site POSTs (foreign
+        Origin). Same-origin browser requests and plain CLI clients pass."""
+        host = self.headers.get("Host")
+        if host and _header_hostname(host) not in _ALLOWED_REQUEST_HOSTNAMES:
+            return True
+        if self.command == "POST":
+            origin = self.headers.get("Origin")
+            if origin and _header_hostname(origin) not in _ALLOWED_REQUEST_HOSTNAMES:
+                return True
+        return False
+
     def do_GET(self):
+        if self._request_blocked():
+            self.send_error(403)
+            return
         path = self.path.split("?", 1)[0]
+        server = self.server
         if path == "/":
-            self._serve_shell()
-        elif path == "/events":
-            self._serve_events()
+            if server.projects_folder is not None:
+                self._serve_index()
+            elif server.default_session_id:
+                self._serve_shell(server.default_session())
+            else:
+                self.send_error(404)
+        elif path == "/events" and server.default_session_id:
+            self._serve_events(server.default_session())
+        elif path == "/api/sessions":
+            if server.projects_folder is None:
+                self.send_error(404)
+            else:
+                self._serve_sessions_json()
+        else:
+            m = _SESSION_PATH_RE.match(path)
+            # unquote: ids are raw file stems, but the URL arrives encoded
+            # (a stem with a space is requested as %20).
+            sess = server.get_session(unquote(m.group(1))) if m else None
+            if sess is None:
+                self.send_error(404)
+            elif m.group(2) == "/events":
+                self._serve_events(sess)
+            elif m.group(2) == "/":
+                self._serve_shell(sess)
+            else:
+                # Canonical trailing slash so the page's relative
+                # EventSource('events') resolves under the session path.
+                self.send_response(301)
+                self.send_header("Location", path + "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+    def do_POST(self):
+        if self._request_blocked():
+            self.send_error(403)
+            return
+        path = self.path.split("?", 1)[0]
+        m = _CLOSE_PATH_RE.match(path)
+        if m and self.server.close_session(unquote(m.group(1))):
+            self._send_json({"closed": True})
         else:
             self.send_error(404)
 
-    def _serve_shell(self):
-        try:
-            # Pre-title the shell so the tab is identifiable before the SSE
-            # replay arrives (and for sessions that never rename).
-            session_title = get_session_title(self.server.session_file)
-        except Exception:
-            session_title = None  # file may not exist yet — title arrives live
-        body = (
-            get_template("live.html")
-            .render(
-                # CARD_JS before LIVE_JS: the SSE handlers call into
-                # window.sessionCard, so the card API must exist first.
-                css=CSS + LIVE_CSS + CARD_CSS,
-                js=CARD_JS + LIVE_JS,
-                session_title=session_title,
-            )
-            .encode("utf-8")
-        )
+    def _send_json(self, obj, status=200):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_html(self, body):
+        body = body.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_index(self):
+        self._send_html(
+            get_template("watch_index.html").render(
+                css=CSS + LIVE_CSS + INDEX_CSS, js=INDEX_JS
+            )
+        )
+
+    def _serve_sessions_json(self):
+        rows = self.server.refresh_sessions()
+        self._send_json(
+            {
+                "sessions": [
+                    {
+                        "id": row["id"],
+                        "url": f"/session/{quote(row['id'])}/",
+                        "project": row["project"],
+                        "title": row["title"],
+                        "summary": row["summary"],
+                        "branch": row["branch"],
+                        "command": row["command"],
+                        "mtime": row["mtime"],
+                        "size": row["size"],
+                        "watchers": row["watchers"],
+                    }
+                    for row in rows
+                ]
+            }
+        )
+
+    def _serve_shell(self, sess):
+        server = self.server
+        with server.sessions_lock:
+            if sess.close_event.is_set():
+                # Loading the page is a deliberate re-open: re-arm the close
+                # latch (bare /events reconnects stay closed — see
+                # close_session).
+                sess.close_event = threading.Event()
+        try:
+            # Pre-title the shell so the tab is identifiable before the SSE
+            # replay arrives (and for sessions that never rename).
+            session_title = get_session_title(sess.path)
+        except Exception:
+            session_title = None  # file may not exist yet — title arrives live
+        self._send_html(
+            get_template("live.html").render(
+                # CARD_JS before LIVE_JS: the SSE handlers call into
+                # window.sessionCard, so the card API must exist first.
+                css=CSS + LIVE_CSS + CARD_CSS,
+                js=CARD_JS + LIVE_JS,
+                session_title=session_title,
+            )
+        )
+
     def _sse_write(self, text):
         self.wfile.write(text.encode("utf-8"))
         self.wfile.flush()
 
-    def _serve_events(self):
+    def _serve_events(self, sess):
         server = self.server
-        # render_message -> ... -> commit_card reads this module global for commit
-        # links. `watch` bypasses generate_html (where it's normally set), so set
-        # it here from the repo resolved once at server construction.
-        global _github_repo
-        _github_repo = server.repo
+        # render_message -> ... -> commit_card needs the session's repo for
+        # commit links. Pinned per-thread: concurrent handlers may stream
+        # sessions from different repos, so a shared global would race.
+        _set_render_repo(server.session_repo(sess))
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -2332,8 +2827,13 @@ class _LiveHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         stop_event = server.stop_event
-        path = server.session_file
+        # Snapshot: close_session() sets this event and swaps in a fresh one,
+        # so only the loops alive at close time exit.
+        close_event = sess.close_event
+        path = sess.path
         poll = server.poll_interval
+        with server.sessions_lock:
+            sess.watchers += 1
         try:
             self._sse_write(format_sse_event("reset", {}))
             offset = 0
@@ -2345,6 +2845,11 @@ class _LiveHandler(BaseHTTPRequestHandler):
             # the turn ended.
             pending_completion = None
             while not stop_event.is_set():
+                if close_event.is_set():
+                    # Closed from the index: tell the client to stop
+                    # reconnecting, then end this stream.
+                    self._sse_write(format_sse_event("closed", {}))
+                    break
                 if not path.exists():
                     if stop_event.wait(poll):
                         break
@@ -2360,6 +2865,10 @@ class _LiveHandler(BaseHTTPRequestHandler):
                 loglines, offset = read_new_loglines(path, offset)
                 changed = False
                 for entry in loglines:
+                    if stop_event.is_set() or close_event.is_set():
+                        # Bound close/shutdown latency: the first batch can be
+                        # an entire transcript, far longer than one poll.
+                        break
                     if entry.get("type") == "ai-title":
                         # Deduped: Claude Code re-writes the same title often.
                         if entry["title"] != last_title:
@@ -2431,28 +2940,53 @@ class _LiveHandler(BaseHTTPRequestHandler):
                     break
         except (BrokenPipeError, ConnectionError, OSError):
             pass  # client disconnected; end this handler thread
+        finally:
+            with server.sessions_lock:
+                sess.watchers -= 1
 
 
 def create_live_server(
     session_file, host="127.0.0.1", port=0, repo=None, poll_interval=0.3
 ):
-    """Build (but do not start) a live-tail HTTP server for `session_file`.
+    """Build (but do not start) a single-session live-tail server.
 
-    Binds immediately to ``host:port`` (use port 0 for an ephemeral port; read
-    the real port from ``server.server_address``). Resolves the GitHub repo once
-    for commit links unless one is supplied. Start with ``serve_forever()`` and
-    stop with ``shutdown()`` then ``server_close()``. Does NOT open a browser —
-    that stays in the command layer so tests never spawn one.
+    ``/`` serves the live shell and ``/events`` the SSE tail. Binds immediately
+    to ``host:port`` (use port 0 for an ephemeral port; read the real port from
+    ``server.server_address``). The GitHub repo for commit links is detected
+    from the session's loglines on first stream unless one is supplied. Start
+    with ``serve_forever()`` and stop with ``shutdown()`` then
+    ``server_close()``. Does NOT open a browser — that stays in the command
+    layer so tests never spawn one.
     """
-    session_file = Path(session_file)
-    if repo is None and session_file.exists():
-        try:
-            repo = detect_github_repo(
-                parse_session_file(session_file).get("loglines", [])
-            )
-        except Exception:
-            repo = None
-    return _LiveServer((host, port), _LiveHandler, session_file, repo, poll_interval)
+    return _LiveServer(
+        (host, port),
+        _LiveHandler,
+        repo=repo,
+        poll_interval=poll_interval,
+        session_file=session_file,
+    )
+
+
+def create_watch_server(
+    projects_folder, host="127.0.0.1", port=0, repo=None, poll_interval=0.3
+):
+    """Build (but do not start) the multi-session watch server.
+
+    ``/`` serves a searchable, auto-refreshing index of every session under
+    ``projects_folder``; each session streams live at ``/session/<id>/`` and
+    any number can be watched concurrently. ``/api/sessions`` lists sessions
+    as JSON (with active-watcher counts) and ``POST /api/sessions/<id>/close``
+    stops a session's streams. ``repo`` (owner/name) overrides commit-link
+    detection for ALL sessions; otherwise each session's repo is detected from
+    its own loglines. Lifecycle and port semantics match create_live_server.
+    """
+    return _LiveServer(
+        (host, port),
+        _LiveHandler,
+        repo=repo,
+        poll_interval=poll_interval,
+        projects_folder=projects_folder,
+    )
 
 
 CSS = """
@@ -3471,7 +4005,7 @@ def _render_session_pages(
     # Add commits as separate timeline items
     for commit_ts, commit_hash, commit_msg, page_num, conv_idx in all_commits:
         item_html = _macros.index_commit(
-            commit_hash, commit_msg, commit_ts, _github_repo
+            commit_hash, commit_msg, commit_ts, _current_github_repo()
         )
         timeline_items.append((commit_ts, "commit", item_html))
 
@@ -3718,12 +4252,12 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
 @click.option(
     "--session",
     type=click.Path(),
-    help="Tail a specific session file instead of the newest.",
+    help="Open straight into this session's live view.",
 )
 @click.option(
     "--pick",
     is_flag=True,
-    help="Choose the session from a list instead of auto-selecting the newest.",
+    help="Choose the session in the terminal instead of from the web index.",
 )
 @click.option(
     "--limit",
@@ -3757,13 +4291,21 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
     help="Seconds between file polls (default: 0.3).",
 )
 def watch_cmd(session, pick, limit, source, port, repo, open_browser, poll_interval):
-    """Tail an active Claude Code session live in your browser.
+    """Watch Claude Code sessions live in your browser.
 
-    Starts a local server and streams the session to the browser as Claude
-    writes it. With no options it tails the most-recently-modified session.
+    Serves a searchable index of your sessions at `/` — pick sessions there
+    to watch any number of them live, each in its own tab, and close active
+    watches from the index. --session and --pick jump straight into one
+    session's live view (the index stays available at `/`).
     """
     projects_folder = Path(source) if source else (Path.home() / ".claude" / "projects")
+    if source and not projects_folder.exists():
+        # A typo'd --source would otherwise serve a permanently empty index.
+        # (The DEFAULT folder may legitimately not exist yet — serve anyway.)
+        click.echo(f"Source directory not found: {projects_folder}")
+        return
 
+    session_file = None
     if pick and not session:
         # Same rows as the `local` picker (branch/project/command columns).
         choices = build_session_choices(projects_folder, limit=limit)
@@ -3776,25 +4318,25 @@ def watch_cmd(session, pick, limit, source, port, repo, open_browser, poll_inter
         if session_file is None:
             click.echo("No session selected.")
             return
-    else:
-        session_file = resolve_active_session(projects_folder, session=session)
+    elif session:
+        session_file = Path(session)
+        if not session_file.exists():
+            click.echo(f"Session file not found: {session_file}")
+            return
 
-    if session_file is None:
-        click.echo("No active session found to watch.")
-        return
-    session_file = Path(session_file)
-    if not session_file.exists():
-        click.echo(f"Session file not found: {session_file}")
-        return
-
-    server = create_live_server(
-        session_file, port=port, repo=repo, poll_interval=poll_interval
+    server = create_watch_server(
+        projects_folder, port=port, repo=repo, poll_interval=poll_interval
     )
-    url = f"http://127.0.0.1:{server.server_address[1]}/"
-    click.echo(f"Watching {session_file}")
-    click.echo(f"Live at {url}  (press Ctrl-C to stop)")
+    index_url = f"http://127.0.0.1:{server.server_address[1]}/"
+    open_url = index_url
+    if session_file is not None:
+        sess = server.register_session(Path(session_file))
+        open_url = f"{index_url}session/{quote(sess.id)}/"
+        click.echo(f"Watching {session_file}")
+        click.echo(f"Live at {open_url}")
+    click.echo(f"Session index at {index_url}  (press Ctrl-C to stop)")
     if open_browser:
-        webbrowser.open(url)
+        webbrowser.open(open_url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
