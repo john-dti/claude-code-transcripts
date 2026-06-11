@@ -558,13 +558,17 @@ class TestAllCommand:
 
 
 class TestFreshnessCheck:
-    """Tests for the --check and --if-stale freshness flags on the all command.
+    """Tests for incremental regeneration and the --check/--force flags.
 
     A session's output is "stale" when (a) no output exists yet, (b) its source
-    JSONL was modified after the recorded render time, or (c) the tool version
-    that produced the output differs from the currently installed version. A
-    sidecar `.cct-state.json` per session output dir captures the source mtime
-    and tool version recorded at render time.
+    JSONL was modified after the recorded render time, or (c) the render
+    fingerprint (tool version + a hash of the inlined CSS/JS and templates)
+    differs from the one recorded at render time — so a git-pinned install
+    that changes commits without changing its version string still
+    invalidates outputs. A sidecar `.cct-state.json` per session output dir
+    captures the source mtime and fingerprint recorded at render time.
+    Incremental is the DEFAULT; --force rebuilds everything; --if-stale is a
+    deprecated alias of the default.
     """
 
     def test_check_reports_zero_stale_immediately_after_full_run(
@@ -645,7 +649,8 @@ class TestFreshnessCheck:
     def test_check_reports_stale_when_tool_version_changes(
         self, mock_projects_dir, output_dir, monkeypatch
     ):
-        """Bumping the recorded tool version must flag every session stale."""
+        """Bumping the tool version changes the render fingerprint, flagging
+        every session stale."""
         runner = CliRunner()
         runner.invoke(
             cli,
@@ -677,8 +682,8 @@ class TestFreshnessCheck:
             ],
         )
         assert check.exit_code == 1
-        assert "tool version changed" in check.output
-        assert "-> 9.99-test" in check.output
+        assert "render fingerprint changed" in check.output
+        assert "9.99-test" in check.output
 
     def test_check_reports_all_stale_when_no_output_exists(
         self, mock_projects_dir, output_dir
@@ -739,6 +744,139 @@ class TestFreshnessCheck:
         assert check.exit_code == 1
         assert "abc123" in check.output
         assert "sidecar missing or malformed" in check.output
+
+    def test_default_run_is_incremental(self, mock_projects_dir, output_dir):
+        """A bare second run must skip fresh sessions — incremental is the
+        default; full rebuilds are opt-in via --force."""
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+
+        before = {
+            p: p.stat().st_mtime
+            for p in output_dir.rglob("*")
+            if p.is_file() and p.suffix == ".html"
+        }
+
+        second = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+            ],
+        )
+        assert second.exit_code == 0, second.output
+        assert "regenerated 0" in second.output
+        assert "skipped 3" in second.output
+
+        after = {
+            p: p.stat().st_mtime
+            for p in output_dir.rglob("*")
+            if p.is_file() and p.suffix == ".html"
+        }
+        assert set(before) == set(after)
+        for path, mtime in before.items():
+            assert after[path] == mtime, f"{path} was rewritten"
+
+    def test_force_rebuilds_fresh_sessions(self, mock_projects_dir, output_dir):
+        """--force must rewrite session HTML even when outputs are fresh."""
+        import time as _time
+
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+        target = output_dir / "project-a" / "abc123" / "index.html"
+        before = target.stat().st_mtime
+        _time.sleep(0.05)  # ensure a regenerated file gets a newer mtime
+
+        forced = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--force",
+                "--quiet",
+            ],
+        )
+        assert forced.exit_code == 0, forced.output
+        assert target.stat().st_mtime > before
+
+    def test_force_and_check_are_mutually_exclusive(
+        self, mock_projects_dir, output_dir
+    ):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--check",
+                "--force",
+            ],
+        )
+        assert result.exit_code == 2
+
+    def test_versiononly_sidecar_is_stale_once(self, mock_projects_dir, output_dir):
+        """Sidecars from before render fingerprinting (tool_version key only)
+        must read as stale so the output self-heals on the next run."""
+        runner = CliRunner()
+        runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+        sidecar = output_dir / "project-a" / "abc123" / ".cct-state.json"
+        state = json.loads(sidecar.read_text(encoding="utf-8"))
+        state.pop("render_fingerprint", None)
+        state["tool_version"] = "0.6"
+        sidecar.write_text(json.dumps(state), encoding="utf-8")
+
+        check = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--check",
+            ],
+        )
+        assert check.exit_code == 1
+        assert "abc123" in check.output
 
     def test_if_stale_skips_fresh_sessions(self, mock_projects_dir, output_dir):
         """If everything is fresh, --if-stale must not rewrite any session HTML."""
@@ -957,6 +1095,31 @@ class TestFreshnessCheck:
         assert set(before) == set(after), "file set changed"
         for path in before:
             assert before[path] == after[path], f"{path} was modified by --check"
+
+
+class TestRenderFingerprint:
+    """_get_render_fingerprint ties freshness to the actual render assets
+    (CSS/JS constants + packaged templates), not just the version string."""
+
+    def test_stable_across_calls(self):
+        import claude_code_transcripts as cct
+
+        assert cct._get_render_fingerprint() == cct._get_render_fingerprint()
+
+    def test_includes_tool_version(self, monkeypatch):
+        import claude_code_transcripts as cct
+
+        monkeypatch.setattr(cct, "_get_tool_version", lambda: "9.99-test")
+        assert "9.99-test" in cct._get_render_fingerprint()
+
+    def test_changes_when_render_assets_change(self, monkeypatch):
+        import claude_code_transcripts as cct
+
+        baseline = cct._get_render_fingerprint()
+        monkeypatch.setattr(cct, "_RENDER_CONTENT_HASH", None)  # reset cache
+        monkeypatch.setattr(cct, "CSS", cct.CSS + "/* design tweak */")
+        changed = cct._get_render_fingerprint()
+        assert changed != baseline
 
 
 class TestJsonCommandWithUrl:

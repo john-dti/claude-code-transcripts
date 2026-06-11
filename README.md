@@ -242,12 +242,21 @@ This creates a directory structure with:
 - Per-project pages listing sessions
 - Individual session transcripts
 
+Re-runs are **incremental**: a session is only re-rendered when its source
+JSONL changed or the tool's render fingerprint (version + CSS/JS/templates)
+differs from the one recorded when it was last rendered, so a daily `all`
+run touches only what's new. Use `--force` to rebuild everything, and
+`--check` to list what would be regenerated (exits non-zero if anything is
+stale — handy in cron).
+
 Options:
 
 - `-s, --source DIRECTORY` - source directory (default: `~/.claude/projects`)
 - `-o, --output DIRECTORY` - output directory (default: `./claude-archive`)
 - `--include-agents` - include agent session files (excluded by default)
 - `--dry-run` - show what would be converted without creating files
+- `--check` - report stale session outputs without writing; exits non-zero if any
+- `--force` - regenerate every session even when its output is up to date
 - `--open` - open the generated archive in your default browser
 - `-q, --quiet` - suppress all output except errors
 

@@ -708,6 +708,41 @@ def _get_tool_version():
         return "unknown"
 
 
+# Cached hash of the render assets; composed with the tool version per call
+# so monkeypatched versions in tests (and real upgrades) are always reflected.
+_RENDER_CONTENT_HASH = None
+
+
+def _get_render_fingerprint():
+    """Identity of everything that shapes rendered HTML: the tool version plus
+    a hash of the inlined CSS/JS constants and the packaged Jinja templates.
+
+    Freshness checks compare this, not the bare version string: a git-pinned
+    install can move to a new commit (new CSS, new templates) without the
+    version changing, and outputs rendered under the old assets must read as
+    stale exactly once.
+    """
+    global _RENDER_CONTENT_HASH
+    if _RENDER_CONTENT_HASH is None:
+        h = hashlib.sha1()
+        # Every module-level CSS/JS string constant, by naming convention —
+        # new constants (e.g. a future page's styles) are picked up without
+        # remembering to register them here.
+        for name in sorted(globals()):
+            if name in ("CSS", "JS") or name.endswith(("_CSS", "_JS")):
+                value = globals()[name]
+                if isinstance(value, str):
+                    h.update(name.encode("utf-8"))
+                    h.update(value.encode("utf-8"))
+        templates_dir = Path(__file__).parent / "templates"
+        for f in sorted(templates_dir.glob("*")):
+            if f.is_file():
+                h.update(f.name.encode("utf-8"))
+                h.update(f.read_bytes())
+        _RENDER_CONTENT_HASH = h.hexdigest()[:12]
+    return f"{_get_tool_version()}+{_RENDER_CONTENT_HASH}"
+
+
 def _session_state_path(session_dir):
     return Path(session_dir) / ".cct-state.json"
 
@@ -736,7 +771,8 @@ def _write_session_state(session_dir, source_path, source_mtime):
     half-written sidecar that would mislead the next freshness check.
     """
     state = {
-        "tool_version": _get_tool_version(),
+        "tool_version": _get_tool_version(),  # informational; fingerprint rules
+        "render_fingerprint": _get_render_fingerprint(),
         "source_mtime": source_mtime,
         "source_path": str(source_path),
     }
@@ -747,11 +783,11 @@ def _write_session_state(session_dir, source_path, source_mtime):
     os.replace(tmp, target)
 
 
-def _session_is_stale(session_info, session_dir, current_version):
+def _session_is_stale(session_info, session_dir, current_fingerprint):
     """Return (is_stale, reason). reason is empty when not stale.
 
     Order of checks matters: a missing output dominates everything else, then
-    sidecar integrity, then version mismatch, then source mtime.
+    sidecar integrity, then fingerprint mismatch, then source mtime.
     """
     session_dir = Path(session_dir)
     if not (session_dir / "index.html").exists():
@@ -759,9 +795,13 @@ def _session_is_stale(session_info, session_dir, current_version):
     state = _read_session_state(session_dir)
     if state is None:
         return True, "sidecar missing or malformed"
-    stored_version = state.get("tool_version", "unknown")
-    if stored_version != current_version:
-        return True, f"tool version changed: {stored_version} -> {current_version}"
+    stored = state.get("render_fingerprint")
+    if stored is None:
+        # Sidecar written before fingerprinting existed: regenerate once so
+        # the output picks up current assets and a comparable sidecar.
+        return True, "sidecar predates render fingerprinting"
+    if stored != current_fingerprint:
+        return True, f"render fingerprint changed: {stored} -> {current_fingerprint}"
     stored_mtime = state.get("source_mtime")
     if not isinstance(stored_mtime, (int, float)):
         return True, "sidecar missing source mtime"
@@ -805,7 +845,7 @@ def generate_batch_html(
 
     projects = find_all_sessions(source_folder, include_agents=include_agents)
 
-    current_version = _get_tool_version() if only_stale else None
+    current_fingerprint = _get_render_fingerprint() if only_stale else None
 
     # When only_stale, the progress total reflects the stale count, not the
     # full session count — otherwise the progress bar lies.
@@ -814,7 +854,9 @@ def generate_batch_html(
         for project in projects:
             for session in project["sessions"]:
                 session_dir = output_dir / project["name"] / session["path"].stem
-                is_stale, _ = _session_is_stale(session, session_dir, current_version)
+                is_stale, _ = _session_is_stale(
+                    session, session_dir, current_fingerprint
+                )
                 if is_stale:
                     total_session_count += 1
     else:
@@ -836,7 +878,9 @@ def generate_batch_html(
             session_dir = project_dir / session_name
 
             if only_stale:
-                is_stale, _ = _session_is_stale(session, session_dir, current_version)
+                is_stale, _ = _session_is_stale(
+                    session, session_dir, current_fingerprint
+                )
                 if not is_stale:
                     skipped_sessions += 1
                     continue
@@ -4733,15 +4777,19 @@ def web_cmd(
     "--check",
     "check_only",
     is_flag=True,
-    help="Report which session outputs are stale (source modified or tool "
-    "version changed) without writing. Exits non-zero if any are stale.",
+    help="Report which session outputs are stale (source modified or render "
+    "fingerprint changed) without writing. Exits non-zero if any are stale.",
 )
 @click.option(
     "--if-stale",
     "if_stale",
     is_flag=True,
-    help="Only regenerate sessions whose source JSONL was modified since the "
-    "last render, or whose recorded tool version differs from the current one.",
+    help="Deprecated: incremental regeneration is now the default.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Regenerate every session even when its output is up to date.",
 )
 @click.option(
     "--open",
@@ -4762,6 +4810,7 @@ def all_cmd(
     dry_run,
     check_only,
     if_stale,
+    force,
     open_browser,
     quiet,
 ):
@@ -4771,14 +4820,19 @@ def all_cmd(
     - Master index listing all projects
     - Per-project pages listing sessions
     - Individual session transcripts
+
+    Incremental by default: sessions whose output is already up to date
+    (same source mtime and render fingerprint) are skipped. Use --force to
+    rebuild everything.
     """
-    # --dry-run, --check, and --if-stale all alter the default "rebuild
-    # everything" behavior in incompatible ways. Reject combinations up front
-    # rather than letting them silently override each other.
+    # The mode flags alter behavior in incompatible ways. Reject combinations
+    # up front rather than letting them silently override each other.
+    # (--if-stale is a deprecated alias of the default incremental mode.)
     mode_flags = {
         "--dry-run": dry_run,
         "--check": check_only,
         "--if-stale": if_stale,
+        "--force": force,
     }
     enabled = [name for name, on in mode_flags.items() if on]
     if len(enabled) > 1:
@@ -4829,13 +4883,13 @@ def all_cmd(
         return
 
     if check_only:
-        current_version = _get_tool_version()
+        current_fingerprint = _get_render_fingerprint()
         stale = []
         for project in projects:
             for session in project["sessions"]:
                 session_dir = output / project["name"] / session["path"].stem
                 is_stale, reason = _session_is_stale(
-                    session, session_dir, current_version
+                    session, session_dir, current_fingerprint
                 )
                 if is_stale:
                     stale.append((project["name"], session["path"].stem, reason))
@@ -4856,12 +4910,13 @@ def all_cmd(
             click.echo(f"  Processed {current}/{total} sessions...")
 
     # Generate the archive using the library function
+    incremental = not force
     stats = generate_batch_html(
         source,
         output,
         include_agents=include_agents,
         progress_callback=on_progress,
-        only_stale=if_stale,
+        only_stale=incremental,
     )
 
     # Report any failures
@@ -4873,7 +4928,7 @@ def all_cmd(
             )
 
     if not quiet:
-        if if_stale:
+        if incremental:
             click.echo(
                 f"\nregenerated {stats['regenerated_sessions']}, "
                 f"skipped {stats['skipped_sessions']}, "
