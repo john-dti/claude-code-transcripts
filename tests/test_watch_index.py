@@ -4,6 +4,7 @@ rendering, the index server routes, and the open/close lifecycle."""
 import json
 import threading
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -284,6 +285,23 @@ class TestWatchServerRouting:
             server.shutdown()
             server.server_close()
             t.join(timeout=5)
+
+    def test_register_session_normalizes_relative_paths(self, tmp_path, monkeypatch):
+        # `watch --session p/abc.jsonl` (relative) and the folder scan
+        # (absolute) must resolve to ONE registry entry, or the index's
+        # close button wouldn't close the CLI-opened watch.
+        p = tmp_path / "p" / "abc.jsonl"
+        _write_session(p, _user_line("hi"), 1000)
+        server = create_watch_server(tmp_path, poll_interval=0.02)
+        try:
+            monkeypatch.chdir(tmp_path)
+            rel = server.register_session(Path("p") / "abc.jsonl")
+            rows = server.refresh_sessions()
+            assert rel.id == "abc"
+            assert [r["id"] for r in rows] == ["abc"]
+            assert len(server.sessions) == 1
+        finally:
+            server.server_close()
 
     def test_legacy_single_session_server_keeps_old_routes(self, tmp_path):
         p = tmp_path / "s.jsonl"

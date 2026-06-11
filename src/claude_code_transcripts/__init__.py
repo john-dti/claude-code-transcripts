@@ -2575,7 +2575,9 @@ class _LiveServer(ThreadingHTTPServer):
         a deterministic path-hash suffix. The registry owns ID assignment so
         session URLs stay stable across rescans.
         """
-        path = Path(path)
+        # Resolve so a relative --session path and the folder scan's absolute
+        # path land on the same entry (else close-from-index misses one).
+        path = Path(path).resolve()
         with self.sessions_lock:
             sess = self._sessions_by_path.get(str(path))
             if sess is not None:
