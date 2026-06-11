@@ -1169,7 +1169,10 @@ class TestArchiveIndexes:
         assert {"abc123", "def456", "ghi789"} <= stems
         entry = next(s for s in data["sessions"] if s["stem"] == "abc123")
         assert entry["project"] == "project-a"
-        assert entry["summary"]
+        assert entry["title"] == "Hello from project A"
+        # No ai-title: summary IS the title, so it is omitted rather than
+        # rendered twice in search results.
+        assert entry["summary"] is None
         assert "date" in entry
 
     def test_master_index_rows_and_activity(self, mock_projects_dir, output_dir):
@@ -1177,7 +1180,13 @@ class TestArchiveIndexes:
         html = (output_dir / "index.html").read_text(encoding="utf-8")
         assert "project-a" in html and "project-b" in html
         assert 'class="activity"' in html
-        assert "data-level=" in html
+        # Fixture mtimes are write-time, so they land in the NEWEST week:
+        # project-a has 2 sessions (level 2), project-b has 1 (level 1).
+        # Wiring assertions must not be satisfiable by an all-zero strip.
+        assert html.count('class="cell"') == 24  # 12 weeks x 2 projects
+        assert 'data-level="2"' in html
+        assert 'data-level="1"' in html
+        assert 'title="2 sessions"' in html
         # The search filter hides rows via the hidden attribute; the explicit
         # display:flex on .ledger-row defeats the UA [hidden] rule without
         # this override (caught live in the headless-Chrome smoke pass).
@@ -1212,7 +1221,7 @@ class TestArchiveIndexes:
         ).group(1)
         assert "</script>" not in data_json
         data = json.loads(data_json)  # still valid JSON after escaping
-        assert any("alert(1)" in s["summary"] for s in data["sessions"])
+        assert any("alert(1)" in s["title"] for s in data["sessions"])
 
     def test_project_index_has_search_and_row_data(self, mock_projects_dir, output_dir):
         self._build(mock_projects_dir, output_dir)
@@ -1220,6 +1229,121 @@ class TestArchiveIndexes:
         assert 'id="archive-search"' in html
         assert "data-search=" in html
         assert "abc123/index.html" in html
+
+    def _island(self, output_dir):
+        html = (output_dir / "index.html").read_text(encoding="utf-8")
+        return json.loads(
+            re.search(
+                r'<script id="archive-data" type="application/json">(.*?)</script>',
+                html,
+                re.DOTALL,
+            ).group(1)
+        )["sessions"]
+
+    def test_island_prefers_ai_title_and_truncates_summary(
+        self, mock_projects_dir, output_dir
+    ):
+        long_prompt = "investigate " + "x" * 180  # 192 chars, under the 200 cap
+        extra = mock_projects_dir / "-home-user-projects-project-a" / "titled1.jsonl"
+        extra.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2025-01-06T10:00:00.000Z",
+                    "message": {"role": "user", "content": long_prompt},
+                }
+            )
+            + "\n"
+            + json.dumps({"type": "ai-title", "aiTitle": "Sharp AI Title"})
+            + "\n",
+            encoding="utf-8",
+        )
+        self._build(mock_projects_dir, output_dir)
+
+        entry = next(s for s in self._island(output_dir) if s["stem"] == "titled1")
+        assert entry["title"] == "Sharp AI Title"
+        assert entry["summary"].startswith("investigate xxx")
+        assert len(entry["summary"]) <= 163  # truncated to 160 + "..."
+
+        # The project index leads with the AI title too.
+        proj = (output_dir / "project-a" / "index.html").read_text(encoding="utf-8")
+        assert ">Sharp AI Title</span>" in proj
+
+    def test_island_omits_summary_equal_to_title(self, mock_projects_dir, output_dir):
+        # No ai-title: the summary IS the title. Truncation must not make
+        # them look different, or master search results show the same text
+        # twice (full as the name, truncated as the sub-line).
+        long_prompt = "review " + "y" * 180
+        extra = mock_projects_dir / "-home-user-projects-project-a" / "plain99.jsonl"
+        extra.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2025-01-07T10:00:00.000Z",
+                    "message": {"role": "user", "content": long_prompt},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self._build(mock_projects_dir, output_dir)
+
+        entry = next(s for s in self._island(output_dir) if s["stem"] == "plain99")
+        assert entry["summary"] is None
+
+    def test_project_row_haystack_content(self, mock_projects_dir, output_dir):
+        # The data-search haystack is a build-time/run-time contract with
+        # ARCHIVE_JS, which lowercases the query before indexOf.
+        branchy = mock_projects_dir / "-home-user-projects-project-a" / "branchy1.jsonl"
+        branchy.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2025-01-08T10:00:00.000Z",
+                    "gitBranch": "DTI/Feature-X",
+                    "message": {"role": "user", "content": "Mixed Case Prompt"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self._build(mock_projects_dir, output_dir)
+        html = (output_dir / "project-a" / "index.html").read_text(encoding="utf-8")
+
+        haystacks = dict(
+            re.findall(r'href="([^"]+)/index.html"[^>]*data-search="([^"]*)"', html)
+        )
+        abc = haystacks["abc123"]
+        assert "abc123" in abc
+        assert "hello from project a" in abc  # lowercased summary words
+        assert re.search(r"\d{4}-\d{2}-\d{2}", abc)  # date participates
+
+        branchy_hay = haystacks["branchy1"]
+        assert "dti/feature-x" in branchy_hay  # lowercased branch
+        assert "DTI/Feature-X" not in branchy_hay
+        assert "mixed case prompt" in branchy_hay
+
+    def test_archive_js_id_contract(self, mock_projects_dir, output_dir):
+        # Every getElementById target in ARCHIVE_JS must exist on the master
+        # page (the JS null-guards, so a renamed id fails SILENTLY: search
+        # results just stop rendering). The project page carries the subset.
+        import claude_code_transcripts as cct
+
+        self._build(mock_projects_dir, output_dir)
+        js_ids = set(re.findall(r"getElementById\('([^']+)'\)", cct.ARCHIVE_JS))
+        assert js_ids == {
+            "archive-search",
+            "archive-data",
+            "session-results",
+            "session-results-list",
+            "archive-empty",
+        }
+        master = (output_dir / "index.html").read_text(encoding="utf-8")
+        for el_id in js_ids:
+            assert f'id="{el_id}"' in master, f"master index missing #{el_id}"
+        proj = (output_dir / "project-a" / "index.html").read_text(encoding="utf-8")
+        for el_id in ("archive-search", "archive-empty"):
+            assert f'id="{el_id}"' in proj, f"project index missing #{el_id}"
 
 
 class TestRenderFingerprint:

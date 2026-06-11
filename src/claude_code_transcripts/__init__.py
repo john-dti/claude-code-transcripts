@@ -1104,12 +1104,20 @@ def _generate_master_index(projects, output_dir, now=None):
         )
 
         for session in project["sessions"]:
+            title = session.get("title") or session["summary"]
             search_sessions.append(
                 {
                     "project": project["name"],
                     "stem": session["path"].stem,
-                    "title": session.get("title") or session["summary"],
-                    "summary": _truncate(session["summary"], 160),
+                    "title": title,
+                    # Equality decided BEFORE truncating: a >160-char summary
+                    # that IS the title would otherwise render twice in
+                    # search results (full name + truncated sub-line).
+                    "summary": (
+                        None
+                        if session["summary"] == title
+                        else _truncate(session["summary"], 160)
+                    ),
                     "branch": session.get("branch"),
                     "command": session.get("command"),
                     "date": datetime.fromtimestamp(session["mtime"]).strftime(
@@ -2842,6 +2850,9 @@ ARCHIVE_JS = r"""
       render();
       input.blur();
     } else if (e.key === 'Enter' || e.key === 'ArrowDown') {
+      // Enter without a query would navigate to the first row — too easy
+      // to hit reflexively right after '/' focuses the box.
+      if (e.key === 'Enter' && !input.value.trim()) return;
       e.preventDefault();
       var first = visibleRows()[0];
       if (!first) return;
@@ -2858,7 +2869,7 @@ ARCHIVE_JS = r"""
 # appended after the base CSS so the overrides win. Kept on the transcript
 # palette; only shapes, focus states, and depth are modernized.
 SEARCH_CSS = """
-#search-box input { padding: 9px 14px; border-radius: 8px; width: 200px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; }
+#search-box input { padding: 9px 14px; border-radius: 8px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; }
 #search-box input:focus { border-color: var(--user-border); box-shadow: 0 0 0 3px rgba(25,118,210,0.18); }
 #search-box button, #modal-search-btn, #modal-close-btn { border-radius: 8px; padding: 9px 12px; transition: background 0.15s; }
 #search-modal[open] { border-radius: 16px; box-shadow: 0 12px 48px rgba(0,0,0,0.28); }
