@@ -1178,6 +1178,10 @@ class TestArchiveIndexes:
         assert "project-a" in html and "project-b" in html
         assert 'class="activity"' in html
         assert "data-level=" in html
+        # The search filter hides rows via the hidden attribute; the explicit
+        # display:flex on .ledger-row defeats the UA [hidden] rule without
+        # this override (caught live in the headless-Chrome smoke pass).
+        assert "[hidden] { display: none !important; }" in html
 
     def test_embedded_json_is_script_safe(self, mock_projects_dir, output_dir):
         """A session summary containing </script> must not break out of the

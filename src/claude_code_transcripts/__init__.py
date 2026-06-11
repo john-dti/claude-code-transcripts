@@ -2642,6 +2642,9 @@ ARCHIVE_CSS = """
   --mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
 }
 * { box-sizing: border-box; }
+/* Explicit display values below would otherwise defeat the hidden attribute
+   the search filter relies on. */
+[hidden] { display: none !important; }
 html { scroll-behavior: smooth; }
 body {
   margin: 0; padding: 30px 20px 90px; background: var(--paper); color: var(--ink);
