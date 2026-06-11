@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote, unquote, urlsplit
 
 import click
 from click_default_group import DefaultGroup
@@ -2516,9 +2517,10 @@ class _WatchedSession:
         self.path = Path(path)
         self.repo = None
         self.repo_resolved = False
-        # Snapshot-and-swap close signal: active SSE loops hold the event they
-        # captured at connect time; close_session() sets it and installs a
-        # fresh one so the session can be re-opened afterward.
+        # Latched close signal: close_session() sets it; loading the session
+        # page (_serve_shell) re-arms it with a fresh Event. SSE loops snapshot
+        # it at connect time, so a connection that arrives while the latch is
+        # set is told 'closed' immediately instead of streaming.
         self.close_event = threading.Event()
         self.watchers = 0
 
@@ -2636,19 +2638,36 @@ class _LiveServer(ThreadingHTTPServer):
         return sess.repo
 
     def close_session(self, session_id):
-        """Stop every active watcher of a session; re-arm for future opens."""
+        """Stop every watcher of a session. The close LATCHES: bare /events
+        reconnects (an orphaned tab's EventSource auto-retry) keep receiving
+        'closed' until the session page is loaded again — _serve_shell is the
+        deliberate re-open that re-arms the event."""
         with self.sessions_lock:
             sess = self.sessions.get(session_id)
             if sess is None:
                 return False
             event = sess.close_event
-            sess.close_event = threading.Event()  # next open starts fresh
         event.set()
         return True
 
 
 _SESSION_PATH_RE = re.compile(r"^/session/([^/]+)(/events|/)?$")
 _CLOSE_PATH_RE = re.compile(r"^/api/sessions/([^/]+)/close$")
+
+# The server binds 127.0.0.1, but binding alone doesn't authenticate the
+# REQUESTER: a malicious page can reach loopback via DNS rebinding (Host) or
+# fire cross-site POSTs (Origin), and /api/sessions exposes transcript titles.
+_ALLOWED_REQUEST_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+
+
+def _header_hostname(value):
+    """Hostname of a Host header or Origin URL, lowercased; None if unparsable."""
+    try:
+        if "//" not in value:
+            value = "//" + value
+        return urlsplit(value).hostname
+    except ValueError:
+        return None
 
 
 class _LiveHandler(BaseHTTPRequestHandler):
@@ -2658,7 +2677,22 @@ class _LiveHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):  # noqa: A002 - keep the CLI output clean
         pass
 
+    def _request_blocked(self):
+        """True for DNS-rebinding (foreign Host) or cross-site POSTs (foreign
+        Origin). Same-origin browser requests and plain CLI clients pass."""
+        host = self.headers.get("Host")
+        if host and _header_hostname(host) not in _ALLOWED_REQUEST_HOSTNAMES:
+            return True
+        if self.command == "POST":
+            origin = self.headers.get("Origin")
+            if origin and _header_hostname(origin) not in _ALLOWED_REQUEST_HOSTNAMES:
+                return True
+        return False
+
     def do_GET(self):
+        if self._request_blocked():
+            self.send_error(403)
+            return
         path = self.path.split("?", 1)[0]
         server = self.server
         if path == "/":
@@ -2677,7 +2711,9 @@ class _LiveHandler(BaseHTTPRequestHandler):
                 self._serve_sessions_json()
         else:
             m = _SESSION_PATH_RE.match(path)
-            sess = server.get_session(m.group(1)) if m else None
+            # unquote: ids are raw file stems, but the URL arrives encoded
+            # (a stem with a space is requested as %20).
+            sess = server.get_session(unquote(m.group(1))) if m else None
             if sess is None:
                 self.send_error(404)
             elif m.group(2) == "/events":
@@ -2693,9 +2729,12 @@ class _LiveHandler(BaseHTTPRequestHandler):
                 self.end_headers()
 
     def do_POST(self):
+        if self._request_blocked():
+            self.send_error(403)
+            return
         path = self.path.split("?", 1)[0]
         m = _CLOSE_PATH_RE.match(path)
-        if m and self.server.close_session(m.group(1)):
+        if m and self.server.close_session(unquote(m.group(1))):
             self._send_json({"closed": True})
         else:
             self.send_error(404)
@@ -2731,7 +2770,7 @@ class _LiveHandler(BaseHTTPRequestHandler):
                 "sessions": [
                     {
                         "id": row["id"],
-                        "url": f"/session/{row['id']}/",
+                        "url": f"/session/{quote(row['id'])}/",
                         "project": row["project"],
                         "title": row["title"],
                         "summary": row["summary"],
@@ -2747,6 +2786,13 @@ class _LiveHandler(BaseHTTPRequestHandler):
         )
 
     def _serve_shell(self, sess):
+        server = self.server
+        with server.sessions_lock:
+            if sess.close_event.is_set():
+                # Loading the page is a deliberate re-open: re-arm the close
+                # latch (bare /events reconnects stay closed — see
+                # close_session).
+                sess.close_event = threading.Event()
         try:
             # Pre-title the shell so the tab is identifiable before the SSE
             # replay arrives (and for sessions that never rename).
@@ -2819,6 +2865,10 @@ class _LiveHandler(BaseHTTPRequestHandler):
                 loglines, offset = read_new_loglines(path, offset)
                 changed = False
                 for entry in loglines:
+                    if stop_event.is_set() or close_event.is_set():
+                        # Bound close/shutdown latency: the first batch can be
+                        # an entire transcript, far longer than one poll.
+                        break
                     if entry.get("type") == "ai-title":
                         # Deduped: Claude Code re-writes the same title often.
                         if entry["title"] != last_title:
@@ -4249,6 +4299,11 @@ def watch_cmd(session, pick, limit, source, port, repo, open_browser, poll_inter
     session's live view (the index stays available at `/`).
     """
     projects_folder = Path(source) if source else (Path.home() / ".claude" / "projects")
+    if source and not projects_folder.exists():
+        # A typo'd --source would otherwise serve a permanently empty index.
+        # (The DEFAULT folder may legitimately not exist yet — serve anyway.)
+        click.echo(f"Source directory not found: {projects_folder}")
+        return
 
     session_file = None
     if pick and not session:
@@ -4276,7 +4331,7 @@ def watch_cmd(session, pick, limit, source, port, repo, open_browser, poll_inter
     open_url = index_url
     if session_file is not None:
         sess = server.register_session(Path(session_file))
-        open_url = f"{index_url}session/{sess.id}/"
+        open_url = f"{index_url}session/{quote(sess.id)}/"
         click.echo(f"Watching {session_file}")
         click.echo(f"Live at {open_url}")
     click.echo(f"Session index at {index_url}  (press Ctrl-C to stop)")

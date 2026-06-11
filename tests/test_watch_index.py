@@ -2,6 +2,7 @@
 rendering, the index server routes, and the open/close lifecycle."""
 
 import json
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -107,6 +108,28 @@ class TestScanWatchSessions:
         assert len(scan_watch_sessions(tmp_path, cache=cache)) == 1
         p.unlink()
         assert scan_watch_sessions(tmp_path, cache=cache) == []
+
+    def test_cache_prunes_deleted_files(self, tmp_path):
+        # The cache contract, not just the row output: entries for vanished
+        # files must not accumulate across rescans.
+        p = tmp_path / "p" / "a.jsonl"
+        _write_session(p, _user_line("a"), 1000)
+        cache = new_watch_index_cache()
+        scan_watch_sessions(tmp_path, cache=cache)
+        assert len(cache) == 1
+        p.unlink()
+        scan_watch_sessions(tmp_path, cache=cache)
+        assert cache == {}
+
+    def test_cache_cleared_when_folder_vanishes(self, tmp_path):
+        folder = tmp_path / "projects"
+        _write_session(folder / "p" / "a.jsonl", _user_line("a"), 1000)
+        cache = new_watch_index_cache()
+        scan_watch_sessions(folder, cache=cache)
+        assert len(cache) == 1
+        shutil.rmtree(folder)
+        assert scan_watch_sessions(folder, cache=cache) == []
+        assert cache == {}
 
 
 class TestRenderRepoThreadLocal:
@@ -392,19 +415,42 @@ class TestWatchersAndClose:
                     lines, lambda evs: any(ev == "closed" for ev, _ in evs)
                 )
                 assert any(ev == "closed" for ev, _ in events)
-                # Stream actually ends: draining completes instead of hanging
-                # (an unclosed stream would block until the httpx read timeout).
-                remaining = list(lines)
-                assert all(ln == "" or ln.startswith(":") for ln in remaining)
-            # Close re-arms: a new watcher connects and streams normally.
+                # Decrement happens on the close path itself — the client is
+                # still connected here, so this can't pass via disconnect.
+                rows = _poll_until(
+                    lambda: [r for r in _get_sessions_json(port) if r["watchers"] == 0]
+                )
+                assert rows
+                # Stream actually ends: a bounded drain sees no further
+                # events. A regressed loop (e.g. missing break) re-emits
+                # 'closed' forever and keepalives defeat the read timeout —
+                # an unbounded list(lines) here would hang the suite.
+                tail = _collect_sse(lines, lambda evs: False, timeout=1.5)
+                assert tail == []
+            # Close LATCHES: a bare reconnect (an orphaned tab's EventSource
+            # auto-retry) is told 'closed' again instead of silently resuming.
             with httpx.stream(
                 "GET", f"http://127.0.0.1:{port}/session/a/events", timeout=10
             ) as resp2:
                 events = _collect_sse(
                     resp2.iter_lines(),
+                    lambda evs: any(ev == "closed" for ev, _ in evs),
+                )
+                kinds = [ev for ev, _ in events]
+                assert "closed" in kinds
+                assert "append" not in kinds and "stats" not in kinds
+            # Loading the session page is the deliberate re-open that re-arms.
+            r = httpx.get(f"http://127.0.0.1:{port}/session/a/", timeout=5)
+            assert r.status_code == 200
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/session/a/events", timeout=10
+            ) as resp3:
+                events = _collect_sse(
+                    resp3.iter_lines(),
                     lambda evs: any(ev == "stats" for ev, _ in evs),
                 )
                 assert any(ev == "reset" for ev, _ in events)
+                assert any(ev == "append" for ev, _ in events)
         finally:
             server.shutdown()
             server.server_close()
@@ -418,6 +464,128 @@ class TestWatchersAndClose:
                 f"http://127.0.0.1:{port}/api/sessions/nope/close", timeout=5
             )
             assert r.status_code == 404
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_close_works_on_legacy_single_session_server(self, tmp_path):
+        # Deliberate: the close API stays live in legacy mode (no index UI
+        # links to it, but the registry exists and closing is harmless).
+        p = tmp_path / "s.jsonl"
+        p.write_bytes(_user_line("hello"))
+        server = create_live_server(p, poll_interval=0.02)
+        port = server.server_address[1]
+        t = _serve_in_thread(server)
+        try:
+            with httpx.stream(
+                "GET", f"http://127.0.0.1:{port}/events", timeout=10
+            ) as resp:
+                lines = resp.iter_lines()
+                _collect_sse(lines, lambda evs: any(ev == "stats" for ev, _ in evs))
+                r = httpx.post(
+                    f"http://127.0.0.1:{port}/api/sessions/s/close", timeout=5
+                )
+                assert r.status_code == 200
+                events = _collect_sse(
+                    lines, lambda evs: any(ev == "closed" for ev, _ in evs)
+                )
+                assert any(ev == "closed" for ev, _ in events)
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+
+class TestPercentEncodedSessionIds:
+    """Session ids that need URL-encoding must round-trip through every route.
+
+    Claude Code's UUID stems are URL-safe, but --session accepts arbitrary
+    files; a stem with a space produced 404s on the page, the SSE stream,
+    and the close endpoint (provenance: live probe with 'my session.jsonl'
+    during the dti/watch-index adversarial review, 2026-06-11)."""
+
+    def test_space_in_stem_is_watchable_and_closable(self, tmp_path):
+        _write_session(tmp_path / "p" / "my session.jsonl", _user_line("hi"), 1000)
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            (row,) = _get_sessions_json(port)
+            assert row["id"] == "my session"
+            assert row["url"] == "/session/my%20session/"
+            r = httpx.get(f"http://127.0.0.1:{port}/session/my%20session/", timeout=5)
+            assert r.status_code == 200
+            r = httpx.post(
+                f"http://127.0.0.1:{port}/api/sessions/my%20session/close", timeout=5
+            )
+            assert r.status_code == 200
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+
+class TestRequestValidation:
+    """Host/Origin checks: a loopback dev server still needs DNS-rebinding
+    and cross-site POST protection — /api/sessions exposes transcript titles."""
+
+    def test_bad_host_header_is_forbidden(self, tmp_path):
+        _write_session(tmp_path / "p" / "a.jsonl", _user_line("hello"), 1000)
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            for url in ("/", "/api/sessions", "/session/a/"):
+                r = httpx.get(
+                    f"http://127.0.0.1:{port}{url}",
+                    headers={"Host": "evil.example.com"},
+                    timeout=5,
+                )
+                assert r.status_code == 403, url
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_cross_origin_close_post_is_forbidden(self, tmp_path):
+        _write_session(tmp_path / "p" / "a.jsonl", _user_line("hello"), 1000)
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            _get_sessions_json(port)  # populate the registry, as the index does
+            r = httpx.post(
+                f"http://127.0.0.1:{port}/api/sessions/a/close",
+                headers={"Origin": "http://evil.example.com"},
+                timeout=5,
+            )
+            assert r.status_code == 403
+            # Same-origin POST (what INDEX_JS sends) still works.
+            r = httpx.post(
+                f"http://127.0.0.1:{port}/api/sessions/a/close",
+                headers={"Origin": f"http://127.0.0.1:{port}"},
+                timeout=5,
+            )
+            assert r.status_code == 200
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+
+class TestRegistryCollisions:
+    """Two same-stem files from different projects must both stay reachable."""
+
+    def test_same_stem_sessions_get_distinct_ids(self, tmp_path):
+        _write_session(tmp_path / "proj-a" / "abc.jsonl", _user_line("alpha"), 2000)
+        _write_session(tmp_path / "proj-b" / "abc.jsonl", _user_line("beta"), 1000)
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            rows = _get_sessions_json(port)
+            ids = [r["id"] for r in rows]
+            assert len(set(ids)) == 2
+            assert ids[0] == "abc"  # newest registers first, keeps the stem
+            assert ids[1].startswith("abc~")
+            # Each id serves its own file (shell is pre-titled per session).
+            for sid, marker in [(ids[0], "alpha"), (ids[1], "beta")]:
+                r = httpx.get(f"http://127.0.0.1:{port}/session/{sid}/", timeout=5)
+                assert r.status_code == 200
+                assert marker in r.text
         finally:
             server.shutdown()
             server.server_close()

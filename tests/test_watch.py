@@ -1563,6 +1563,20 @@ class TestWatchCommand:
         assert result.exit_code == 0, result.output
         assert "Session index at" in result.output
 
+    def test_missing_explicit_source_errors(
+        self, tmp_path, monkeypatch, mock_webbrowser_open
+    ):
+        # A typo'd --source must say so, not serve a permanently empty index.
+        # serve_forever is stubbed so a regression fails fast instead of
+        # blocking the runner in the serve loop.
+        monkeypatch.setattr(
+            "claude_code_transcripts._LiveServer.serve_forever", lambda self: None
+        )
+        result = CliRunner().invoke(cli, ["watch", "--source", str(tmp_path / "typo")])
+        assert result.exit_code == 0
+        assert "Source directory not found" in result.output
+        assert mock_webbrowser_open == []
+
     def test_session_flag_opens_directly(
         self, tmp_path, monkeypatch, mock_webbrowser_open
     ):
