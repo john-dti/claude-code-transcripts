@@ -73,6 +73,16 @@ class TestGenerateHtml:
         index_html = (output_dir / "index.html").read_text(encoding="utf-8")
         assert index_html == snapshot_html
 
+    def test_index_search_ui_is_modernized(self, output_dir):
+        """The per-session index ships the SEARCH_CSS facelift (focus rings,
+        blurred backdrop) on top of the base search modal styles."""
+        fixture_path = Path(__file__).parent / "sample_session.json"
+        generate_html(fixture_path, output_dir, github_repo="example/project")
+
+        index_html = (output_dir / "index.html").read_text(encoding="utf-8")
+        assert "backdrop-filter" in index_html
+        assert "#search-modal[open]" in index_html
+
     def test_generates_page_001_html(self, output_dir, snapshot_html):
         """Test page-001.html generation."""
         fixture_path = Path(__file__).parent / "sample_session.json"

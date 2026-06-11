@@ -944,6 +944,43 @@ def generate_batch_html(
     return stats
 
 
+def _activity_weeks(mtimes, now, weeks=12):
+    """Bucket mtimes into trailing 7-day windows ending at `now`.
+
+    Returns counts oldest -> newest, length `weeks`. Future mtimes (clock
+    skew, files written mid-scan) count in the newest week rather than
+    disappearing from the strip.
+    """
+    counts = [0] * weeks
+    week_secs = 7 * 86400
+    for mtime in mtimes:
+        age = max(0.0, now - mtime)
+        bucket = int(age // week_secs)
+        if bucket < weeks:
+            counts[weeks - 1 - bucket] += 1
+    return counts
+
+
+def _activity_level(count):
+    """Map a weekly session count to a 0-3 intensity for the activity strip."""
+    if count == 0:
+        return 0
+    if count == 1:
+        return 1
+    if count <= 3:
+        return 2
+    return 3
+
+
+def _archive_json(payload):
+    """JSON for embedding inside a <script type="application/json"> block.
+
+    '<' is unicode-escaped so user-controlled text (session summaries can
+    contain a literal '</script>') cannot break out of the data island.
+    """
+    return json.dumps(payload).replace("<", "\\u003c")
+
+
 def _generate_project_index(project, output_dir):
     """Generate index.html for a single project."""
     template = get_template("project_index.html")
@@ -952,14 +989,30 @@ def _generate_project_index(project, output_dir):
     sessions_data = []
     for session in project["sessions"]:
         mod_time = datetime.fromtimestamp(session["mtime"])
+        date = mod_time.strftime("%Y-%m-%d %H:%M")
+        title = session.get("title") or session["summary"]
         sessions_data.append(
             {
                 "name": session["path"].stem,
+                "title": title,
                 "summary": session["summary"],
                 "branch": session.get("branch"),
                 "command": session.get("command"),
-                "date": mod_time.strftime("%Y-%m-%d %H:%M"),
+                "date": date,
                 "size_kb": session["size"] / 1024,
+                "search": " ".join(
+                    filter(
+                        None,
+                        [
+                            session["path"].stem,
+                            title,
+                            session["summary"],
+                            session.get("branch"),
+                            session.get("command"),
+                            date,
+                        ],
+                    )
+                ).lower(),
             }
         )
 
@@ -967,20 +1020,23 @@ def _generate_project_index(project, output_dir):
         project_name=project["name"],
         sessions=sessions_data,
         session_count=len(sessions_data),
-        css=CSS,
-        js=JS,
+        css=ARCHIVE_CSS,
+        js=ARCHIVE_JS,
     )
 
     output_path = output_dir / "index.html"
     output_path.write_text(html_content, encoding="utf-8")
 
 
-def _generate_master_index(projects, output_dir):
-    """Generate master index.html listing all projects."""
+def _generate_master_index(projects, output_dir, now=None):
+    """Generate master index.html listing all projects, with per-project
+    activity strips and the embedded session data that powers archive-wide
+    client-side search."""
     template = get_template("master_index.html")
+    now = datetime.now().timestamp() if now is None else now
 
-    # Format projects for template
     projects_data = []
+    search_sessions = []
     total_sessions = 0
 
     for project in projects:
@@ -994,20 +1050,40 @@ def _generate_master_index(projects, output_dir):
         else:
             recent_date = "N/A"
 
+        counts = _activity_weeks([s["mtime"] for s in project["sessions"]], now=now)
         projects_data.append(
             {
                 "name": project["name"],
                 "session_count": session_count,
                 "recent_date": recent_date,
+                "activity": [(_activity_level(n), n) for n in counts],
+                "search": project["name"].lower(),
             }
         )
+
+        for session in project["sessions"]:
+            search_sessions.append(
+                {
+                    "project": project["name"],
+                    "stem": session["path"].stem,
+                    "title": session.get("title") or session["summary"],
+                    "summary": _truncate(session["summary"], 160),
+                    "branch": session.get("branch"),
+                    "command": session.get("command"),
+                    "date": datetime.fromtimestamp(session["mtime"]).strftime(
+                        "%Y-%m-%d"
+                    ),
+                }
+            )
 
     html_content = template.render(
         projects=projects_data,
         total_projects=len(projects),
         total_sessions=total_sessions,
-        css=CSS,
-        js=JS,
+        generated_date=datetime.fromtimestamp(now).strftime("%Y-%m-%d"),
+        sessions_json=_archive_json({"sessions": search_sessions}),
+        css=ARCHIVE_CSS,
+        js=ARCHIVE_JS,
     )
 
     output_path = output_dir / "index.html"
@@ -2550,6 +2626,204 @@ INDEX_JS = r"""
   refresh();
   setInterval(refresh, 3000);
 })();
+"""
+
+# The static archive indexes (master + per-project) carry their own complete
+# stylesheet — an "engineering ledger" look: ruled paper, ink, one blueprint
+# accent, IBM Plex type (with offline-safe fallbacks). Standalone rather than
+# appended to CSS so the @import sits first (browsers ignore non-leading
+# @import) and transcript pages stay untouched.
+ARCHIVE_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+:root {
+  --paper: #f4f1ea; --paper-raise: #fcfaf5; --ink: #211f19; --ink-soft: #716c5f;
+  --rule: #ddd7c9; --rule-strong: #b9b1a0; --accent: #1f4fc2; --accent-soft: #dbe4f8;
+  --sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; padding: 30px 20px 90px; background: var(--paper); color: var(--ink);
+  font-family: var(--sans); line-height: 1.55;
+  background-image: repeating-linear-gradient(0deg, transparent 0 27px, rgba(33,31,25,0.027) 27px 28px);
+}
+.container { max-width: 860px; margin: 0 auto; }
+a { color: inherit; }
+.ledger-head { border-bottom: 3px double var(--rule-strong); padding-bottom: 18px; margin-bottom: 8px; animation: lg-fade 0.45s ease both; }
+.ledger-kicker { font: 600 0.7rem/1 var(--mono); letter-spacing: 0.3em; color: var(--accent); margin: 0 0 12px; }
+.ledger-kicker a { color: inherit; text-decoration: none; }
+.ledger-kicker a:hover { text-decoration: underline; }
+.ledger-title { font: 700 2.15rem/1.1 var(--sans); letter-spacing: -0.02em; margin: 0 0 12px; overflow-wrap: anywhere; }
+.ledger-stats { font: 400 0.78rem/1.5 var(--mono); color: var(--ink-soft); margin: 0; }
+.ledger-search { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 10px; padding: 16px 0 14px; background: linear-gradient(var(--paper) 82%, transparent); }
+.ledger-search input {
+  flex: 1; font: 400 0.95rem var(--sans); color: var(--ink); padding: 11px 14px;
+  background: var(--paper-raise); border: 1px solid var(--rule-strong); border-radius: 3px;
+  outline: none; transition: border-color 0.15s, box-shadow 0.15s;
+}
+.ledger-search input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.ledger-search input::placeholder { color: var(--ink-soft); }
+.ledger-search kbd {
+  font: 500 0.72rem var(--mono); color: var(--ink-soft); background: var(--paper-raise);
+  border: 1px solid var(--rule-strong); border-bottom-width: 2px; border-radius: 4px; padding: 3px 8px;
+}
+.ledger-section { font: 600 0.68rem/1 var(--mono); letter-spacing: 0.24em; color: var(--ink-soft); margin: 28px 0 2px; padding: 0 0 8px 14px; }
+.ledger-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  padding: 13px 12px 13px 14px; border-bottom: 1px solid var(--rule);
+  border-left: 2px solid transparent; text-decoration: none;
+  transition: background 0.12s, border-left-color 0.12s;
+  animation: lg-row 0.3s ease both; animation-delay: calc(var(--i, 0) * 24ms);
+}
+.ledger-row:hover, .ledger-row:focus-visible { background: var(--paper-raise); border-left-color: var(--accent); outline: none; }
+.ledger-row-main { min-width: 0; }
+.ledger-name { display: block; font: 600 1.02rem/1.35 var(--sans); }
+.ledger-sub { display: block; font: 400 0.88rem/1.4 var(--sans); color: var(--ink-soft); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ledger-meta { display: block; font: 400 0.73rem/1.6 var(--mono); color: var(--ink-soft); margin-top: 5px; }
+.ledger-meta .chip { border: 1px solid var(--rule-strong); border-radius: 3px; padding: 1px 6px; margin-right: 2px; }
+.activity { display: flex; gap: 3px; flex: none; align-items: flex-end; }
+.activity .cell { width: 9px; height: 18px; border-radius: 1.5px; background: rgba(33,31,25,0.08); }
+.activity .cell[data-level="1"] { background: #b6c6ec; }
+.activity .cell[data-level="2"] { background: #6d8edb; }
+.activity .cell[data-level="3"] { background: var(--accent); }
+.ledger-empty { font: 400 0.85rem var(--mono); color: var(--ink-soft); text-align: center; padding: 42px 0; }
+@keyframes lg-fade { from { opacity: 0; } }
+@keyframes lg-row { from { opacity: 0; transform: translateY(5px); } }
+@media (max-width: 640px) {
+  body { padding: 18px 12px 60px; }
+  .activity { display: none; }
+  .ledger-title { font-size: 1.6rem; }
+}
+@media print { .ledger-search { display: none; } }
+"""
+
+# Search driver shared by both archive index pages. Static rows carry a
+# data-search haystack; the master page additionally searches every session
+# in the archive via the embedded #archive-data JSON island. All dynamic DOM
+# is built with createElement/textContent — session titles are user content.
+ARCHIVE_JS = r"""
+(function () {
+  var input = document.getElementById('archive-search');
+  if (!input) return;
+  var rows = Array.prototype.slice.call(document.querySelectorAll('[data-search]'));
+  var resultsWrap = document.getElementById('session-results');
+  var resultsList = document.getElementById('session-results-list');
+  var emptyEl = document.getElementById('archive-empty');
+  var dataEl = document.getElementById('archive-data');
+  var sessions = [];
+  if (dataEl) {
+    try { sessions = JSON.parse(dataEl.textContent).sessions || []; } catch (e) {}
+    sessions.forEach(function (s) {
+      s.haystack = [s.project, s.stem, s.title, s.summary, s.branch, s.command, s.date]
+        .filter(Boolean).join(' ').toLowerCase();
+    });
+  }
+
+  function buildResult(s) {
+    var a = document.createElement('a');
+    a.className = 'ledger-row';
+    a.href = encodeURIComponent(s.project) + '/' + encodeURIComponent(s.stem) + '/index.html';
+    var main = document.createElement('div');
+    main.className = 'ledger-row-main';
+    var name = document.createElement('span');
+    name.className = 'ledger-name';
+    name.textContent = s.title || s.summary || s.stem;
+    main.appendChild(name);
+    if (s.summary && s.summary !== s.title) {
+      var sub = document.createElement('span');
+      sub.className = 'ledger-sub';
+      sub.textContent = s.summary;
+      main.appendChild(sub);
+    }
+    var meta = document.createElement('span');
+    meta.className = 'ledger-meta';
+    meta.textContent = [s.project, s.date, s.branch && '[' + s.branch + ']', s.command]
+      .filter(Boolean).join('  ·  ');
+    main.appendChild(meta);
+    a.appendChild(main);
+    return a;
+  }
+
+  function render() {
+    var q = input.value.trim().toLowerCase();
+    var visible = 0;
+    rows.forEach(function (row) {
+      var hit = !q || row.getAttribute('data-search').indexOf(q) !== -1;
+      row.hidden = !hit;
+      if (hit) visible += 1;
+    });
+    var found = 0;
+    if (resultsWrap && resultsList) {
+      resultsList.innerHTML = '';
+      if (q) {
+        sessions.filter(function (s) { return s.haystack.indexOf(q) !== -1; })
+          .slice(0, 50)
+          .forEach(function (s) { resultsList.appendChild(buildResult(s)); found += 1; });
+      }
+      resultsWrap.hidden = !q || found === 0;
+    }
+    if (emptyEl) emptyEl.hidden = !q || visible + found > 0;
+  }
+
+  function visibleRows() {
+    return Array.prototype.filter.call(
+      document.querySelectorAll('.ledger-row'),
+      function (r) { return !r.hidden; }
+    );
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === '/' && document.activeElement !== input &&
+        !/INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || '')) {
+      e.preventDefault();
+      input.focus();
+      input.select();
+      return;
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    var cur = document.activeElement;
+    if (!cur || !cur.classList || !cur.classList.contains('ledger-row')) return;
+    e.preventDefault();
+    var vis = visibleRows();
+    var i = vis.indexOf(cur);
+    var next = e.key === 'ArrowDown' ? vis[i + 1] : (i === 0 ? input : vis[i - 1]);
+    if (next && next.focus) next.focus();
+  });
+
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+      input.value = '';
+      render();
+      input.blur();
+    } else if (e.key === 'Enter' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      var first = visibleRows()[0];
+      if (!first) return;
+      if (e.key === 'Enter') first.click();
+      else first.focus();
+    }
+  });
+
+  input.addEventListener('input', render);
+})();
+"""
+
+# Facelift for the per-session index's search UI (box, modal, results) —
+# appended after the base CSS so the overrides win. Kept on the transcript
+# palette; only shapes, focus states, and depth are modernized.
+SEARCH_CSS = """
+#search-box input { padding: 9px 14px; border-radius: 8px; width: 200px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; }
+#search-box input:focus { border-color: var(--user-border); box-shadow: 0 0 0 3px rgba(25,118,210,0.18); }
+#search-box button, #modal-search-btn, #modal-close-btn { border-radius: 8px; padding: 9px 12px; transition: background 0.15s; }
+#search-modal[open] { border-radius: 16px; box-shadow: 0 12px 48px rgba(0,0,0,0.28); }
+#search-modal::backdrop { background: rgba(15,18,26,0.45); backdrop-filter: blur(3px); }
+.search-modal-header { padding: 14px 16px; border-radius: 16px 16px 0 0; }
+.search-modal-header input { padding: 10px 14px; border-radius: 8px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; }
+.search-modal-header input:focus { border-color: var(--user-border); box-shadow: 0 0 0 3px rgba(25,118,210,0.18); }
+.search-result { border-radius: 10px; border: 1px solid rgba(0,0,0,0.07); box-shadow: none; transition: border-color 0.12s, box-shadow 0.12s; }
+.search-result:hover { border-color: var(--user-border); box-shadow: 0 2px 10px rgba(25,118,210,0.12); }
+.search-result mark { background: #ffe082; border-radius: 2px; padding: 0 2px; }
 """
 
 
@@ -4118,7 +4392,7 @@ def _render_session_pages(
     index_pagination = generate_index_pagination_html(total_pages)
     index_template = get_template("index.html")
     index_content = index_template.render(
-        css=CSS + CARD_CSS,
+        css=CSS + CARD_CSS + SEARCH_CSS,
         js=JS + CARD_JS,
         session_title=title,
         card_json=card_json,

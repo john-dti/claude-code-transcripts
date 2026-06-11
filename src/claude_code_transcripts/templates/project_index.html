@@ -3,26 +3,25 @@
 {% block title %}{{ project_name }} - Claude Code Archive{% endblock %}
 
 {% block content %}
-        <h1><a href="../index.html" style="color: inherit; text-decoration: none;">Claude Code Archive</a> / {{ project_name }}</h1>
-        <p style="color: var(--text-muted); margin-bottom: 24px;">{{ session_count }} session{% if session_count != 1 %}s{% endif %}</p>
-
-        {% for session in sessions %}
-        <div class="index-item">
-            <a href="{{ session.name }}/index.html">
-                <div class="index-item-header">
-                    <span class="index-item-number">{{ session.date }}</span>
-                    <span style="color: var(--text-muted);">{{ "%.0f"|format(session.size_kb) }} KB</span>
-                    {% if session.command %}<span style="color: var(--text-muted);"> · {{ session.command }}</span>{% endif %}
-                    {% if session.branch %}<span style="color: var(--text-muted);"> · {{ session.branch }}</span>{% endif %}
-                </div>
-                <div class="index-item-content">
-                    <p style="margin: 0;">{{ session.summary[:100] }}{% if session.summary|length > 100 %}...{% endif %}</p>
+        <header class="ledger-head">
+            <p class="ledger-kicker"><a href="../index.html">CLAUDE CODE / ARCHIVE</a></p>
+            <h1 class="ledger-title">{{ project_name }}</h1>
+            <p class="ledger-stats">{{ session_count }} session{% if session_count != 1 %}s{% endif %}</p>
+        </header>
+        <div class="ledger-search">
+            <input type="search" id="archive-search" placeholder="Search these sessions…" autocomplete="off" aria-label="Search sessions">
+            <kbd title="Press / to search">/</kbd>
+        </div>
+        <section id="session-list">
+        {%- for session in sessions %}
+            <a class="ledger-row" href="{{ session.name }}/index.html" style="--i: {{ [loop.index0, 15]|min }}" data-search="{{ session.search }}">
+                <div class="ledger-row-main">
+                    <span class="ledger-name">{{ session.title }}</span>
+                    {% if session.summary and session.summary != session.title %}<span class="ledger-sub">{{ session.summary[:160] }}</span>{% endif %}
+                    <span class="ledger-meta">{{ session.date }} · {{ "%.0f"|format(session.size_kb) }} KB{% if session.branch %} · <span class="chip">{{ session.branch }}</span>{% endif %}{% if session.command %} · {{ session.command }}{% endif %}</span>
                 </div>
             </a>
-        </div>
-        {% endfor %}
-
-        <div style="margin-top: 24px;">
-            <a href="../index.html" class="pagination" style="display: inline-block; padding: 8px 16px; background: var(--user-border); color: white; text-decoration: none; border-radius: 6px;">Back to Archive</a>
-        </div>
+        {%- endfor %}
+        </section>
+        <p id="archive-empty" class="ledger-empty" hidden>No matches.</p>
 {%- endblock %}

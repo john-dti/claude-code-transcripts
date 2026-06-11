@@ -1,6 +1,7 @@
 """Tests for batch conversion functionality."""
 
 import json
+import re
 import tempfile
 from pathlib import Path
 
@@ -1095,6 +1096,126 @@ class TestFreshnessCheck:
         assert set(before) == set(after), "file set changed"
         for path in before:
             assert before[path] == after[path], f"{path} was modified by --check"
+
+
+class TestActivityWeeks:
+    """_activity_weeks: bucket session mtimes into trailing weekly counts for
+    the master index activity strips."""
+
+    NOW = 1_000_000_000.0
+    WEEK = 7 * 86400
+
+    def test_buckets_count_sessions_per_week(self):
+        from claude_code_transcripts import _activity_weeks
+
+        mtimes = [
+            self.NOW - 1,  # this week
+            self.NOW - 2,  # this week
+            self.NOW - self.WEEK - 1,  # last week
+        ]
+        weeks = _activity_weeks(mtimes, now=self.NOW, weeks=4)
+        assert weeks == [0, 0, 1, 2]  # oldest -> newest
+
+    def test_older_than_window_excluded(self):
+        from claude_code_transcripts import _activity_weeks
+
+        mtimes = [self.NOW - 5 * self.WEEK]
+        assert _activity_weeks(mtimes, now=self.NOW, weeks=4) == [0, 0, 0, 0]
+
+    def test_empty_input(self):
+        from claude_code_transcripts import _activity_weeks
+
+        assert _activity_weeks([], now=self.NOW, weeks=12) == [0] * 12
+
+    def test_future_mtimes_count_in_newest_week(self):
+        from claude_code_transcripts import _activity_weeks
+
+        # Clock skew / just-written files must not vanish from the strip.
+        weeks = _activity_weeks([self.NOW + 60], now=self.NOW, weeks=4)
+        assert weeks == [0, 0, 0, 1]
+
+
+class TestArchiveIndexes:
+    """The redesigned master/project indexes: search affordances and the
+    embedded session data that powers archive-wide search."""
+
+    def _build(self, mock_projects_dir, output_dir):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "all",
+                "--source",
+                str(mock_projects_dir),
+                "--output",
+                str(output_dir),
+                "--quiet",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+    def test_master_index_has_search_and_data(self, mock_projects_dir, output_dir):
+        self._build(mock_projects_dir, output_dir)
+        html = (output_dir / "index.html").read_text(encoding="utf-8")
+        assert 'id="archive-search"' in html
+        assert 'id="archive-data"' in html
+        data_json = re.search(
+            r'<script id="archive-data" type="application/json">(.*?)</script>',
+            html,
+            re.DOTALL,
+        ).group(1)
+        data = json.loads(data_json)
+        stems = {s["stem"] for s in data["sessions"]}
+        assert {"abc123", "def456", "ghi789"} <= stems
+        entry = next(s for s in data["sessions"] if s["stem"] == "abc123")
+        assert entry["project"] == "project-a"
+        assert entry["summary"]
+        assert "date" in entry
+
+    def test_master_index_rows_and_activity(self, mock_projects_dir, output_dir):
+        self._build(mock_projects_dir, output_dir)
+        html = (output_dir / "index.html").read_text(encoding="utf-8")
+        assert "project-a" in html and "project-b" in html
+        assert 'class="activity"' in html
+        assert "data-level=" in html
+
+    def test_embedded_json_is_script_safe(self, mock_projects_dir, output_dir):
+        """A session summary containing </script> must not break out of the
+        data block — '<' is unicode-escaped in the embedded JSON."""
+        evil = mock_projects_dir / "-home-user-projects-project-a" / "evil99.jsonl"
+        evil.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2025-01-03T10:00:00.000Z",
+                    "message": {
+                        "role": "user",
+                        # Mid-prose so the metadata scanner keeps it as a
+                        # summary (leading '<' reads as a command wrapper).
+                        "content": "explain </script><script>alert(1)</script> here",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self._build(mock_projects_dir, output_dir)
+        html = (output_dir / "index.html").read_text(encoding="utf-8")
+        data_json = re.search(
+            r'<script id="archive-data" type="application/json">(.*?)</script>',
+            html,
+            re.DOTALL,
+        ).group(1)
+        assert "</script>" not in data_json
+        data = json.loads(data_json)  # still valid JSON after escaping
+        assert any("alert(1)" in s["summary"] for s in data["sessions"])
+
+    def test_project_index_has_search_and_row_data(self, mock_projects_dir, output_dir):
+        self._build(mock_projects_dir, output_dir)
+        html = (output_dir / "project-a" / "index.html").read_text(encoding="utf-8")
+        assert 'id="archive-search"' in html
+        assert "data-search=" in html
+        assert "abc123/index.html" in html
 
 
 class TestRenderFingerprint:

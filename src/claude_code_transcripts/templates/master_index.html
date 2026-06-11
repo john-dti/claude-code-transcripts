@@ -3,20 +3,32 @@
 {% block title %}Claude Code Archive{% endblock %}
 
 {% block content %}
-        <h1>Claude Code Archive</h1>
-        <p style="color: var(--text-muted); margin-bottom: 24px;">{{ total_projects }} projects · {{ total_sessions }} sessions</p>
-
-        {% for project in projects %}
-        <div class="index-item">
-            <a href="{{ project.name }}/index.html">
-                <div class="index-item-header">
-                    <span class="index-item-number">{{ project.name }}</span>
-                    <time>{{ project.recent_date }}</time>
+        <header class="ledger-head">
+            <p class="ledger-kicker">CLAUDE CODE</p>
+            <h1 class="ledger-title">Session Archive</h1>
+            <p class="ledger-stats">{{ total_projects }} project{% if total_projects != 1 %}s{% endif %} · {{ total_sessions }} session{% if total_sessions != 1 %}s{% endif %} · rendered {{ generated_date }}</p>
+        </header>
+        <div class="ledger-search">
+            <input type="search" id="archive-search" placeholder="Search projects and sessions…" autocomplete="off" aria-label="Search projects and sessions">
+            <kbd title="Press / to search">/</kbd>
+        </div>
+        <section id="project-list">
+        {%- for project in projects %}
+            <a class="ledger-row" href="{{ project.name }}/index.html" style="--i: {{ [loop.index0, 15]|min }}" data-search="{{ project.search }}">
+                <div class="ledger-row-main">
+                    <span class="ledger-name">{{ project.name }}</span>
+                    <span class="ledger-meta">{{ project.session_count }} session{% if project.session_count != 1 %}s{% endif %} · last {{ project.recent_date }}</span>
                 </div>
-                <div class="index-item-content">
-                    <p style="margin: 0;">{{ project.session_count }} session{% if project.session_count != 1 %}s{% endif %}</p>
+                <div class="activity" title="Sessions per week, last 12 weeks">
+                    {%- for level, n in project.activity %}<span class="cell" data-level="{{ level }}" title="{{ n }} session{% if n != 1 %}s{% endif %}"></span>{%- endfor %}
                 </div>
             </a>
-        </div>
-        {% endfor %}
+        {%- endfor %}
+        </section>
+        <section id="session-results" hidden>
+            <h2 class="ledger-section">SESSIONS</h2>
+            <div id="session-results-list"></div>
+        </section>
+        <p id="archive-empty" class="ledger-empty" hidden>No matches.</p>
+        <script id="archive-data" type="application/json">{{ sessions_json|safe }}</script>
 {%- endblock %}
