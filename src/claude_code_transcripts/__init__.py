@@ -2479,13 +2479,24 @@ INDEX_JS = r"""
     }
   }
 
+  // Re-render only when the data changed (or on the slow tick, so the age
+  // labels stay roughly current): an unconditional 3s repaint would tear
+  // down rows out from under an in-flight click.
+  var lastPayload = null;
+  var lastRenderAt = 0;
   function refresh() {
     fetch('api/sessions')
       .then(function (r) { return r.json(); })
       .then(function (data) {
         sessions = data.sessions || [];
         setStatus(true, '● live');
-        render();
+        var payload = JSON.stringify(sessions);
+        var stale = Date.now() - lastRenderAt > 30000;
+        if (payload !== lastPayload || stale) {
+          lastPayload = payload;
+          lastRenderAt = Date.now();
+          render();
+        }
       })
       .catch(function () { setStatus(false, '● reconnecting…'); });
   }
