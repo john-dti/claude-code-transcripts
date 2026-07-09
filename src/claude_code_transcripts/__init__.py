@@ -3408,6 +3408,92 @@ def create_watch_server(
     )
 
 
+# ---------------------------------------------------------------------------
+# Watch daemon state: one JSON file per projects folder records the running
+# background server (pid/port/urls) so a relaunch can find it, open the
+# browser at it, and --stop can shut it down. Lives outside the projects
+# folder itself so nothing ever mistakes it for a session file.
+
+
+def _watch_state_dir():
+    """Directory for daemon state files; override with
+    CLAUDE_CODE_TRANSCRIPTS_STATE_DIR (used by tests, handy for users)."""
+    override = os.environ.get("CLAUDE_CODE_TRANSCRIPTS_STATE_DIR")
+    if override:
+        return Path(override)
+    return Path.home() / ".claude-code-transcripts"
+
+
+def _watch_state_key(projects_folder):
+    # resolve() so relative and absolute spellings of the same folder share
+    # one state file (and one running daemon).
+    resolved = str(Path(projects_folder).resolve())
+    return hashlib.sha1(resolved.encode("utf-8")).hexdigest()[:12]
+
+
+def _watch_state_path(projects_folder):
+    return _watch_state_dir() / f"watch-{_watch_state_key(projects_folder)}.json"
+
+
+def _watch_log_path(projects_folder):
+    """The daemon's stdout/stderr log — where startup crashes surface."""
+    return _watch_state_dir() / f"watch-{_watch_state_key(projects_folder)}.log"
+
+
+def _write_watch_state(projects_folder, pid, port, open_url):
+    path = _watch_state_path(projects_folder)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state = {
+        "pid": pid,
+        "port": port,
+        "index_url": f"http://127.0.0.1:{port}/",
+        "open_url": open_url,
+        "source": str(Path(projects_folder).resolve()),
+    }
+    path.write_text(json.dumps(state), encoding="utf-8")
+    return state
+
+
+def _read_watch_state(projects_folder):
+    """The recorded daemon state, or None when absent/corrupt. A corrupt
+    file reads as 'not running' — the launch path overwrites it anyway."""
+    try:
+        return json.loads(
+            _watch_state_path(projects_folder).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+
+
+def _clear_watch_state(projects_folder):
+    try:
+        _watch_state_path(projects_folder).unlink()
+    except OSError:
+        pass
+
+
+def _probe_watch_server(state, projects_folder, timeout=1.0):
+    """Index URL of a live, trusted watch server described by `state`, else
+    None. Trusted means /api/watch-info answers as this app AND names the
+    same projects folder — a stale port grabbed by some other local service
+    (or by a watch of a different folder) must not count as 'running'."""
+    port = (state or {}).get("port")
+    if not port:
+        return None
+    index_url = f"http://127.0.0.1:{port}/"
+    try:
+        info = httpx.get(f"{index_url}api/watch-info", timeout=timeout).json()
+    except Exception:
+        return None
+    if info.get("app") != "claude-code-transcripts":
+        return None
+    try:
+        same_source = Path(info["source"]).resolve() == Path(projects_folder).resolve()
+    except (KeyError, OSError):
+        return None
+    return index_url if same_source else None
+
+
 CSS = """
 :root { --bg-color: #f5f5f5; --card-bg: #ffffff; --user-bg: #e3f2fd; --user-border: #1976d2; --assistant-bg: #f5f5f5; --assistant-border: #9e9e9e; --thinking-bg: #fff8e1; --thinking-border: #ffc107; --thinking-text: #666; --tool-bg: #f3e5f5; --tool-border: #9c27b0; --tool-result-bg: #e8f5e9; --tool-error-bg: #ffebee; --text-color: #212121; --text-muted: #757575; --code-bg: #263238; --code-text: #aed581; }
 * { box-sizing: border-box; }

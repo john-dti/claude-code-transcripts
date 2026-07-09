@@ -17,6 +17,99 @@ from test_watch import _serve_in_thread, _user_line, _write_session
 from test_watch_index import _poll_until, _start_watch_server
 
 
+@pytest.fixture()
+def state_dir(tmp_path, monkeypatch):
+    """Point the daemon state dir at a temp folder for the whole test."""
+    d = tmp_path / "state"
+    monkeypatch.setenv("CLAUDE_CODE_TRANSCRIPTS_STATE_DIR", str(d))
+    return d
+
+
+class TestWatchStateFile:
+    """The on-disk record of a running watch server (pid/port/urls)."""
+
+    def test_write_then_read_roundtrip(self, tmp_path, state_dir):
+        cct._write_watch_state(
+            tmp_path, pid=123, port=456, open_url="http://127.0.0.1:456/"
+        )
+        state = cct._read_watch_state(tmp_path)
+        assert state["pid"] == 123
+        assert state["port"] == 456
+        assert state["open_url"] == "http://127.0.0.1:456/"
+        assert Path(state["source"]) == tmp_path.resolve()
+
+    def test_read_missing_returns_none(self, tmp_path, state_dir):
+        assert cct._read_watch_state(tmp_path) is None
+
+    def test_read_corrupt_returns_none(self, tmp_path, state_dir):
+        path = cct._watch_state_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("not json{", encoding="utf-8")
+        assert cct._read_watch_state(tmp_path) is None
+
+    def test_clear_removes_state(self, tmp_path, state_dir):
+        cct._write_watch_state(tmp_path, pid=1, port=2, open_url="u")
+        cct._clear_watch_state(tmp_path)
+        assert cct._read_watch_state(tmp_path) is None
+        cct._clear_watch_state(tmp_path)  # idempotent when already gone
+
+    def test_state_paths_scoped_per_source(self, tmp_path, state_dir):
+        a = cct._watch_state_path(tmp_path / "a")
+        b = cct._watch_state_path(tmp_path / "b")
+        assert a != b
+        assert a.parent == b.parent == state_dir
+
+    def test_state_path_stable_across_spellings(self, tmp_path, state_dir, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        absolute = cct._watch_state_path(tmp_path / "proj")
+        relative = cct._watch_state_path(Path("proj"))
+        assert absolute == relative
+
+    def test_log_path_sits_beside_state(self, tmp_path, state_dir):
+        state = cct._watch_state_path(tmp_path)
+        log = cct._watch_log_path(tmp_path)
+        assert log.parent == state.parent
+        assert log.stem == state.stem
+        assert log.suffix == ".log"
+
+
+class TestProbeWatchServer:
+    """_probe_watch_server: trust a recorded server only if it answers
+    /api/watch-info as OUR app serving the SAME projects folder."""
+
+    def test_healthy_matching_server_returns_index_url(self, tmp_path, state_dir):
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            url = cct._probe_watch_server({"port": port}, tmp_path)
+            assert url == f"http://127.0.0.1:{port}/"
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_dead_port_returns_none(self, tmp_path, state_dir):
+        server, port, t = _start_watch_server(tmp_path)
+        server.shutdown()
+        server.server_close()
+        t.join(timeout=5)
+        assert cct._probe_watch_server({"port": port}, tmp_path) is None
+
+    def test_server_for_other_source_returns_none(self, tmp_path, state_dir):
+        other = tmp_path / "other"
+        other.mkdir()
+        server, port, t = _start_watch_server(other)
+        try:
+            assert cct._probe_watch_server({"port": port}, tmp_path) is None
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_none_or_incomplete_state_returns_none(self, tmp_path, state_dir):
+        assert cct._probe_watch_server(None, tmp_path) is None
+        assert cct._probe_watch_server({}, tmp_path) is None
+
+
 class TestWatchInfoEndpoint:
     """GET /api/watch-info identifies the server so relaunches can trust it."""
 
