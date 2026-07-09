@@ -4932,8 +4932,8 @@ def _stop_watch_daemon(projects_folder):
         httpx.post(f"{index_url}api/shutdown", timeout=5.0)
     except Exception:
         pass  # the connection may drop as the server exits — that IS success
-    _poll_until_gone = time.monotonic() + 5.0
-    while time.monotonic() < _poll_until_gone:
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
         if _probe_watch_server(state, projects_folder, timeout=0.5) is None:
             break
         time.sleep(0.1)
