@@ -8,8 +8,10 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
@@ -3440,7 +3442,7 @@ def _watch_log_path(projects_folder):
     return _watch_state_dir() / f"watch-{_watch_state_key(projects_folder)}.log"
 
 
-def _write_watch_state(projects_folder, pid, port, open_url):
+def _write_watch_state(projects_folder, pid, port, open_url, token=None):
     path = _watch_state_path(projects_folder)
     path.parent.mkdir(parents=True, exist_ok=True)
     state = {
@@ -3449,6 +3451,7 @@ def _write_watch_state(projects_folder, pid, port, open_url):
         "index_url": f"http://127.0.0.1:{port}/",
         "open_url": open_url,
         "source": str(Path(projects_folder).resolve()),
+        "token": token,
     }
     path.write_text(json.dumps(state), encoding="utf-8")
     return state
@@ -4753,6 +4756,171 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
         webbrowser.open(index_url)
 
 
+def _open_session_on(index_url, session_file):
+    """Register `session_file` on the running server at `index_url`; returns
+    the absolute live-view URL, or None if the server refused/vanished."""
+    try:
+        r = httpx.post(
+            f"{index_url}api/sessions/open",
+            json={"path": str(Path(session_file).resolve())},
+            timeout=5.0,
+        )
+        if r.status_code != 200:
+            return None
+        return index_url.rstrip("/") + r.json()["url"]
+    except Exception:
+        return None
+
+
+def _spawn_watch_daemon(projects_folder, source, port, repo, poll_interval, session):
+    """Start a detached `watch --foreground` child; returns (Popen, token).
+
+    The child binds its own port, writes the state file, and serves until
+    /api/shutdown (or a kill). Detachment: no console window on Windows, its
+    own session on POSIX — either way it survives this terminal closing.
+    stdout/stderr land in the per-source log so startup crashes are readable.
+
+    The launch token (random, passed through the child's environment and
+    echoed back in its state file) is how the parent recognizes THIS child's
+    state. Popen.pid can't do that job: Windows venv pythons are trampoline
+    executables, so the served process is the launcher's grandchild and
+    os.getpid() there never equals Popen.pid.
+    """
+    token = os.urandom(16).hex()
+    cmd = [
+        sys.executable,
+        "-m",
+        "claude_code_transcripts",
+        "watch",
+        "--foreground",
+        "--no-open",
+        "--port",
+        str(port),
+        "--poll-interval",
+        str(poll_interval),
+    ]
+    if source:
+        # Resolved so the child lands on the same state file even though the
+        # user's spelling was relative. Only forwarded when the user gave
+        # --source: the default folder may not exist yet, and an explicit
+        # --source of a missing folder is (deliberately) an error.
+        cmd += ["--source", str(Path(projects_folder).resolve())]
+    if repo:
+        cmd += ["--repo", repo]
+    if session is not None:
+        cmd += ["--session", str(Path(session).resolve())]
+    log_path = _watch_log_path(projects_folder)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        kwargs = {
+            "creationflags": subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+        }
+    else:
+        kwargs = {"start_new_session": True}
+    env = {**os.environ, "CLAUDE_CODE_TRANSCRIPTS_LAUNCH_TOKEN": token}
+    with open(log_path, "w", encoding="utf-8") as log:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env, **kwargs
+        )
+    return proc, token
+
+
+def _wait_for_watch_child(projects_folder, proc, token, timeout=15.0):
+    """State written by the spawned child once it serves and answers its
+    identity probe; None if the child died or never became healthy. The
+    launch-token match ensures we adopt the CHILD's state, not a stale file."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return None
+        state = _read_watch_state(projects_folder)
+        if (
+            state
+            and state.get("token") == token
+            and _probe_watch_server(state, projects_folder, timeout=0.5)
+        ):
+            return state
+        time.sleep(0.15)
+    return None
+
+
+def _echo_log_tail(log_path, lines=15):
+    try:
+        tail = (
+            log_path.read_text(encoding="utf-8", errors="replace")
+            .strip()
+            .splitlines()[-lines:]
+        )
+    except OSError:
+        return
+    for line in tail:
+        click.echo(f"  {line}")
+
+
+def _stop_watch_daemon(projects_folder):
+    """Stop the recorded watch server for this folder (if it really is one)."""
+    state = _read_watch_state(projects_folder)
+    index_url = _probe_watch_server(state, projects_folder)
+    if index_url is None:
+        _clear_watch_state(projects_folder)  # sweep any stale record
+        click.echo(f"No watch server running for {Path(projects_folder).resolve()}")
+        return
+    try:
+        httpx.post(f"{index_url}api/shutdown", timeout=5.0)
+    except Exception:
+        pass  # the connection may drop as the server exits — that IS success
+    _poll_until_gone = time.monotonic() + 5.0
+    while time.monotonic() < _poll_until_gone:
+        if _probe_watch_server(state, projects_folder, timeout=0.5) is None:
+            break
+        time.sleep(0.1)
+    # The child clears its own state on the way out; this covers hard deaths.
+    _clear_watch_state(projects_folder)
+    click.echo(f"Stopped watch server at {index_url}")
+
+
+def _run_watch_foreground(
+    projects_folder, session_file, port, repo, poll_interval, open_browser
+):
+    """Serve the watch index in this process until Ctrl-C or /api/shutdown.
+    Registers the daemon state file while serving so relaunches (and --stop)
+    can find this server, and clears it on the way out."""
+    server = create_watch_server(
+        projects_folder, port=port, repo=repo, poll_interval=poll_interval
+    )
+    index_url = f"http://127.0.0.1:{server.server_address[1]}/"
+    open_url = index_url
+    if session_file is not None:
+        sess = server.register_session(Path(session_file))
+        open_url = f"{index_url}session/{quote(sess.id)}/"
+        click.echo(f"Watching {session_file}")
+        click.echo(f"Live at {open_url}")
+    click.echo(f"Session index at {index_url}  (press Ctrl-C to stop)")
+    _write_watch_state(
+        projects_folder,
+        pid=os.getpid(),
+        port=server.server_address[1],
+        open_url=open_url,
+        # Set when a backgrounding parent spawned us — echoing it back is how
+        # that parent recognizes this state file as ours (see _spawn_watch_daemon).
+        token=os.environ.get("CLAUDE_CODE_TRANSCRIPTS_LAUNCH_TOKEN"),
+    )
+    if open_browser:
+        webbrowser.open(open_url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        click.echo("\nStopping…")
+    finally:
+        server.stop_event.set()
+        server.server_close()
+        # Only remove a record that is still ours — never a successor's.
+        state = _read_watch_state(projects_folder)
+        if state is None or state.get("pid") == os.getpid():
+            _clear_watch_state(projects_folder)
+
+
 @cli.command("watch")
 @click.option(
     "--session",
@@ -4795,19 +4963,51 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
     default=0.3,
     help="Seconds between file polls (default: 0.3).",
 )
-def watch_cmd(session, pick, limit, source, port, repo, open_browser, poll_interval):
+@click.option(
+    "--foreground",
+    is_flag=True,
+    help="Serve in this terminal (Ctrl-C to stop) instead of the background.",
+)
+@click.option(
+    "--stop",
+    "stop_server",
+    is_flag=True,
+    help="Stop the background watch server for this projects folder.",
+)
+def watch_cmd(
+    session,
+    pick,
+    limit,
+    source,
+    port,
+    repo,
+    open_browser,
+    poll_interval,
+    foreground,
+    stop_server,
+):
     """Watch Claude Code sessions live in your browser.
 
-    Serves a searchable index of your sessions at `/` — pick sessions there
-    to watch any number of them live, each in its own tab, and close active
-    watches from the index. --session and --pick jump straight into one
-    session's live view (the index stays available at `/`).
+    Starts a background server, opens your browser at the searchable session
+    index at `/`, and returns the terminal to you. Pick sessions on the index
+    to watch any number of them live, each in its own tab. Re-running while
+    the server is up just re-opens the browser; stop it with --stop, or use
+    --foreground to serve in this terminal instead.
+
+    --session and --pick jump straight into one session's live view (the
+    index stays available at `/`).
     """
+    if foreground and stop_server:
+        raise click.UsageError("--stop and --foreground are mutually exclusive.")
     projects_folder = Path(source) if source else (Path.home() / ".claude" / "projects")
     if source and not projects_folder.exists():
         # A typo'd --source would otherwise serve a permanently empty index.
         # (The DEFAULT folder may legitimately not exist yet — serve anyway.)
         click.echo(f"Source directory not found: {projects_folder}")
+        return
+
+    if stop_server:
+        _stop_watch_daemon(projects_folder)
         return
 
     session_file = None
@@ -4829,26 +5029,46 @@ def watch_cmd(session, pick, limit, source, port, repo, open_browser, poll_inter
             click.echo(f"Session file not found: {session_file}")
             return
 
-    server = create_watch_server(
-        projects_folder, port=port, repo=repo, poll_interval=poll_interval
+    # Relaunch while a healthy server for this folder is up: no second
+    # server — just point the browser at it (registering the requested
+    # session there first, when one was asked for).
+    existing = _probe_watch_server(_read_watch_state(projects_folder), projects_folder)
+    if existing:
+        open_url = existing
+        if session_file is not None:
+            open_url = _open_session_on(existing, session_file) or existing
+            click.echo(f"Live at {open_url}")
+        click.echo(f"Watch server already running at {existing}")
+        if open_browser:
+            webbrowser.open(open_url)
+        return
+
+    if foreground:
+        _run_watch_foreground(
+            projects_folder, session_file, port, repo, poll_interval, open_browser
+        )
+        return
+
+    # Background default: detach a --foreground child, wait until it writes
+    # its state file and answers the identity probe, then hand the terminal
+    # back with the browser pointed at it.
+    proc, token = _spawn_watch_daemon(
+        projects_folder, source, port, repo, poll_interval, session_file
     )
-    index_url = f"http://127.0.0.1:{server.server_address[1]}/"
-    open_url = index_url
+    state = _wait_for_watch_child(projects_folder, proc, token)
+    if state is None:
+        log_path = _watch_log_path(projects_folder)
+        _echo_log_tail(log_path)
+        raise click.ClickException(f"Watch server failed to start — see {log_path}")
     if session_file is not None:
-        sess = server.register_session(Path(session_file))
-        open_url = f"{index_url}session/{quote(sess.id)}/"
         click.echo(f"Watching {session_file}")
-        click.echo(f"Live at {open_url}")
-    click.echo(f"Session index at {index_url}  (press Ctrl-C to stop)")
+        click.echo(f"Live at {state['open_url']}")
+    click.echo(
+        f"Session index at {state['index_url']}  "
+        "(background — stop with: claude-code-transcripts watch --stop)"
+    )
     if open_browser:
-        webbrowser.open(open_url)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        click.echo("\nStopping…")
-    finally:
-        server.stop_event.set()
-        server.server_close()
+        webbrowser.open(state["open_url"])
 
 
 def is_url(path):

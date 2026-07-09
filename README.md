@@ -96,11 +96,18 @@ claude-code-transcripts local --limit 20
 
 ### Live tailing
 
-The `watch` command streams **in-progress** sessions into your browser in real time — a `tail -f` with the same rich rendering as the static pages. It starts a small local server, opens your browser, and pushes each new message (via [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)) as Claude appends it to the session file. A running stats bar (prompts, messages, tool calls, commits) and a clickable list of prompts update live as the session grows.
+The `watch` command streams **in-progress** sessions into your browser in real time — a `tail -f` with the same rich rendering as the static pages. It starts a small local server **in the background**, opens your browser, hands the terminal back, and pushes each new message (via [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)) as Claude appends it to the session file. A running stats bar (prompts, messages, tool calls, commits) and a clickable list of prompts update live as the session grows.
 
 ```bash
-# Open the live session index and pick sessions to watch from there
+# Start the background server (if needed) and open the live session index
 claude-code-transcripts watch
+
+# Later: running it again just re-opens the browser at the same server
+claude-code-transcripts watch
+# -> Watch server already running at http://127.0.0.1:PORT/
+
+# Stop the background server
+claude-code-transcripts watch --stop
 ```
 
 The index at `/` lists every session under `~/.claude/projects`, newest first, with a search box that filters by title, summary, project, branch, and slash command as you type. It refreshes itself every few seconds, so new sessions appear as they start and recently-active ones carry an `● active` marker. Click a session to watch it live in a new tab — open as many as you like; each tab streams independently. Sessions with live watchers show an `● watching` badge and a `✕ close` button that stops their streams (the watching tabs say `● closed` and stop reconnecting; re-open from the index any time).
@@ -125,8 +132,10 @@ Options:
 - `--repo OWNER/NAME` - GitHub repo for commit links, applied to every session (auto-detected per session if not specified)
 - `--open` / `--no-open` - open the browser (default: open)
 - `--poll-interval SECONDS` - how often to check the file for new lines (default: 0.3)
+- `--foreground` - serve in this terminal (`Ctrl-C` to stop) instead of the background
+- `--stop` - stop the background watch server for this projects folder
 
-Press `Ctrl-C` to stop the server. The page reconnects automatically and re-syncs if the session file is rewritten (for example when Claude compacts it).
+The background server is tracked per projects folder in `~/.claude-code-transcripts/` (override the location with `CLAUDE_CODE_TRANSCRIPTS_STATE_DIR`); its output lands in a `watch-*.log` next to the state file. Re-running `watch` while the server is up doesn't start a second one — it verifies the recorded server is really this tool serving the same folder, then just opens the browser (registering the `--session` you asked for, if any). The page reconnects automatically and re-syncs if the session file is rewritten (for example when Claude compacts it).
 
 The tab title follows the session's auto-generated name (the same name `claude --resume` shows) and renames itself live as the session evolves, so multiple watch tabs stay identifiable.
 

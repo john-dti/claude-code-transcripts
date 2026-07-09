@@ -3,18 +3,32 @@ the on-disk state file, the background-by-default CLI, and --stop."""
 
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 
 import httpx
 import pytest
+from click.testing import CliRunner
 
 import claude_code_transcripts as cct
-from claude_code_transcripts import create_live_server, create_watch_server
+from claude_code_transcripts import cli, create_live_server, create_watch_server
 
 from test_watch import _serve_in_thread, _user_line, _write_session
 from test_watch_index import _poll_until, _start_watch_server
+
+
+class _FakeProc:
+    """Stand-in for the detached child's Popen in CLI-orchestration tests."""
+
+    def __init__(self, pid, returncode=None):
+        self.pid = pid
+        self._returncode = returncode
+
+    def poll(self):
+        return self._returncode
 
 
 @pytest.fixture()
@@ -246,3 +260,225 @@ class TestShutdownEndpoint:
             server.shutdown()
             server.server_close()
             t.join(timeout=5)
+
+
+class TestWatchCliDaemon:
+    """CLI orchestration: background by default, already-running detection,
+    --foreground compatibility, and --stop. The detach itself is covered by
+    TestWatchDaemonEndToEnd."""
+
+    def _src(self, tmp_path):
+        src = tmp_path / "projects"
+        _write_session(src / "p" / "live.jsonl", _user_line("hello"), 2000)
+        return src
+
+    def test_foreground_writes_state_while_serving_and_clears_after(
+        self, tmp_path, monkeypatch
+    ):
+        src = self._src(tmp_path)
+        seen = {}
+
+        def fake_serve(server_self):
+            seen["state"] = cct._read_watch_state(src)
+
+        monkeypatch.setattr(
+            "claude_code_transcripts._LiveServer.serve_forever", fake_serve
+        )
+        result = CliRunner().invoke(
+            cli, ["watch", "--foreground", "--source", str(src)]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Session index at" in result.output
+        assert seen["state"]["pid"] == os.getpid()  # registered while serving
+        assert cct._read_watch_state(src) is None  # cleared on exit
+
+    def test_already_running_opens_browser_and_says_so(
+        self, tmp_path, monkeypatch, mock_webbrowser_open
+    ):
+        src = self._src(tmp_path)
+        server, port, t = _start_watch_server(src)
+        index_url = f"http://127.0.0.1:{port}/"
+        cct._write_watch_state(src, pid=os.getpid(), port=port, open_url=index_url)
+        monkeypatch.setattr(
+            "claude_code_transcripts._spawn_watch_daemon",
+            lambda *a, **k: pytest.fail("must not spawn a second daemon"),
+        )
+        try:
+            result = CliRunner().invoke(cli, ["watch", "--source", str(src)])
+            assert result.exit_code == 0, result.output
+            assert "already running" in result.output
+            assert mock_webbrowser_open == [index_url]
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_already_running_with_session_opens_live_view(
+        self, tmp_path, monkeypatch, mock_webbrowser_open
+    ):
+        src = self._src(tmp_path)
+        session_file = src / "p" / "live.jsonl"
+        server, port, t = _start_watch_server(src)
+        index_url = f"http://127.0.0.1:{port}/"
+        cct._write_watch_state(src, pid=os.getpid(), port=port, open_url=index_url)
+        monkeypatch.setattr(
+            "claude_code_transcripts._spawn_watch_daemon",
+            lambda *a, **k: pytest.fail("must not spawn a second daemon"),
+        )
+        try:
+            result = CliRunner().invoke(
+                cli,
+                ["watch", "--source", str(src), "--session", str(session_file)],
+            )
+            assert result.exit_code == 0, result.output
+            assert "already running" in result.output
+            assert mock_webbrowser_open == [f"{index_url}session/live/"]
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_background_launch_reports_and_opens_index(
+        self, tmp_path, monkeypatch, mock_webbrowser_open
+    ):
+        src = self._src(tmp_path)
+        running = {}
+
+        def fake_spawn(projects_folder, source, port, repo, poll_interval, session):
+            # Play the child's part: serve for real and write the state file.
+            server, srv_port, t = _start_watch_server(src)
+            running["cleanup"] = (server, t)
+            cct._write_watch_state(
+                src,
+                pid=4242,
+                port=srv_port,
+                open_url=f"http://127.0.0.1:{srv_port}/",
+                token="tok-1",
+            )
+            return _FakeProc(pid=4242), "tok-1"
+
+        monkeypatch.setattr("claude_code_transcripts._spawn_watch_daemon", fake_spawn)
+        try:
+            result = CliRunner().invoke(cli, ["watch", "--source", str(src)])
+            assert result.exit_code == 0, result.output
+            assert "Session index at" in result.output
+            assert "--stop" in result.output  # tells the user how to stop it
+            state = cct._read_watch_state(src)
+            assert mock_webbrowser_open == [state["open_url"]]
+        finally:
+            server, t = running["cleanup"]
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_background_child_death_reports_log(self, tmp_path, monkeypatch):
+        src = self._src(tmp_path)
+
+        def fake_spawn(projects_folder, source, port, repo, poll_interval, session):
+            log = cct._watch_log_path(src)
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text("boom: port already in use\n", encoding="utf-8")
+            return _FakeProc(pid=4242, returncode=1), "tok-dead"
+
+        monkeypatch.setattr("claude_code_transcripts._spawn_watch_daemon", fake_spawn)
+        result = CliRunner().invoke(cli, ["watch", "--source", str(src)])
+        assert result.exit_code != 0
+        assert "failed to start" in result.output
+        assert "boom: port already in use" in result.output  # log tail echoed
+
+    def test_stop_stops_running_server(self, tmp_path, mock_webbrowser_open):
+        src = self._src(tmp_path)
+        server, port, t = _start_watch_server(src)
+        cct._write_watch_state(
+            src, pid=os.getpid(), port=port, open_url=f"http://127.0.0.1:{port}/"
+        )
+        try:
+            result = CliRunner().invoke(cli, ["watch", "--stop", "--source", str(src)])
+            assert result.exit_code == 0, result.output
+            assert "Stopped watch server" in result.output
+            t.join(timeout=5)
+            assert not t.is_alive()  # serve loop actually ended
+            assert cct._read_watch_state(src) is None
+            assert mock_webbrowser_open == []  # --stop never opens a browser
+        finally:
+            if t.is_alive():
+                server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_stop_when_nothing_running(self, tmp_path):
+        src = self._src(tmp_path)
+        cct._write_watch_state(src, pid=1, port=1, open_url="u")  # stale record
+        result = CliRunner().invoke(cli, ["watch", "--stop", "--source", str(src)])
+        assert result.exit_code == 0, result.output
+        assert "No watch server running" in result.output
+        assert cct._read_watch_state(src) is None  # stale record swept
+
+    def test_stop_and_foreground_are_mutually_exclusive(self, tmp_path):
+        result = CliRunner().invoke(
+            cli, ["watch", "--stop", "--foreground", "--source", str(tmp_path)]
+        )
+        assert result.exit_code != 0
+        assert "mutually exclusive" in result.output
+
+    def test_help_lists_daemon_options(self):
+        result = CliRunner().invoke(cli, ["watch", "--help"])
+        assert result.exit_code == 0
+        assert "--foreground" in result.output
+        assert "--stop" in result.output
+
+
+class TestWatchDaemonEndToEnd:
+    """Tier-3 boundary smoke: the real detached process, over three real CLI
+    invocations — launch, relaunch (already running), stop."""
+
+    def test_detached_lifecycle(self, tmp_path):
+        src = tmp_path / "projects"
+        _write_session(src / "p" / "live.jsonl", _user_line("hello"), 2000)
+        # os.environ already carries the isolated CLAUDE_CODE_TRANSCRIPTS_STATE_DIR
+        # from the autouse conftest fixture, so parent, child, and this test
+        # all read the same state file.
+        env = os.environ.copy()
+        base = [
+            sys.executable,
+            "-m",
+            "claude_code_transcripts",
+            "watch",
+            "--no-open",
+            "--source",
+            str(src),
+        ]
+
+        launch = subprocess.run(
+            base, capture_output=True, text=True, timeout=60, env=env
+        )
+        try:
+            # The parent returns promptly (the whole point of background mode)
+            # and reports where the daemon serves.
+            assert launch.returncode == 0, launch.stdout + launch.stderr
+            assert "Session index at" in launch.stdout
+            state = cct._read_watch_state(src)
+            assert state is not None
+            r = httpx.get(state["index_url"], timeout=5)
+            assert r.status_code == 200
+            assert 'id="session-list"' in r.text
+
+            relaunch = subprocess.run(
+                base, capture_output=True, text=True, timeout=60, env=env
+            )
+            assert relaunch.returncode == 0, relaunch.stdout + relaunch.stderr
+            assert "already running" in relaunch.stdout
+            # Same daemon, not a second one.
+            assert cct._read_watch_state(src)["pid"] == state["pid"]
+        finally:
+            stop = subprocess.run(
+                base + ["--stop"], capture_output=True, text=True, timeout=60, env=env
+            )
+
+        assert stop.returncode == 0, stop.stdout + stop.stderr
+        assert "Stopped watch server" in stop.stdout
+        gone = _poll_until(
+            lambda: cct._probe_watch_server(state, src) is None, timeout=10
+        )
+        assert gone
+        assert cct._read_watch_state(src) is None
