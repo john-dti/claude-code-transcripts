@@ -8,8 +8,10 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
@@ -2519,31 +2521,44 @@ LIVE_JS = r"""
 })();
 """
 
-# Styles for the watch index page only (appended to CSS + LIVE_CSS, which
-# already provide .index-item and the live-status states).
+# Watch-index additions on top of ARCHIVE_CSS (the shared engineering-ledger
+# stylesheet): the live status chip, the age/watching column, and the close
+# rail. Rows are wrapped in .ledger-item so the close button can be a real
+# <button> beside the row's <a> (buttons can't nest inside anchors).
 INDEX_CSS = """
-.watch-search { margin: 0 0 12px; }
-.watch-search input { width: 100%; padding: 10px 14px; font-size: 1rem; border: 1px solid #ccc; border-radius: 8px; background: var(--card-bg); color: var(--text-color); }
-.watch-when { color: var(--text-muted); font-size: 0.85rem; white-space: nowrap; }
-.watch-active { color: #2e7d32; }
-.watch-summary { margin-bottom: 4px; }
-.watch-meta { color: var(--text-muted); font-size: 0.85rem; }
-.watch-actions { display: flex; align-items: center; gap: 10px; padding: 6px 16px; border-top: 1px solid rgba(0,0,0,0.06); }
-.watch-badge { color: #2e7d32; font-size: 0.85rem; font-weight: 600; }
-.watch-close-btn { background: transparent; border: 1px solid #ef9a9a; color: #b71c1c; border-radius: 6px; padding: 2px 10px; cursor: pointer; font-size: 0.85rem; }
-.watch-close-btn:hover { background: #ffebee; }
-.watch-empty { color: var(--text-muted); padding: 24px 0; text-align: center; }
+.ledger-stats .watch-status { font-weight: 600; }
+.watch-status.live { color: #1e6b34; }
+.watch-status.down { color: var(--ink-soft); }
+.ledger-item { display: flex; align-items: stretch; border-bottom: 1px solid var(--rule); }
+.ledger-item .ledger-row { flex: 1; min-width: 0; border-bottom: none; }
+.watch-right { display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 4px; flex: none; }
+.watch-when { font: 400 0.73rem/1.4 var(--mono); color: var(--ink-soft); white-space: nowrap; }
+.watch-when.watch-active { color: #1e6b34; }
+.watch-badge { font: 600 0.7rem/1.4 var(--mono); color: #1e6b34; white-space: nowrap; }
+.watch-close {
+  flex: none; border: none; border-left: 1px solid var(--rule); background: transparent;
+  color: var(--ink-soft); font: 500 0.75rem var(--mono); padding: 0 14px; cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.watch-close:hover, .watch-close:focus-visible { background: #f7e8e6; color: #a13c2f; outline: none; }
+/* Entry animation only on the first paint: the list re-renders every few
+   seconds while sessions are active, and replaying the stagger would strobe. */
+#session-list.settled .ledger-row { animation: none; }
 """
 
-# The watch index client: polls api/sessions, renders searchable rows, opens
-# sessions in new tabs, and closes active watches. All user-controlled text
-# goes through textContent so it is never parsed as HTML.
+# The watch index client: polls api/sessions, renders searchable ledger rows,
+# opens sessions in new tabs, and closes active watches. Search + keyboard
+# affordances mirror ARCHIVE_JS (/ to focus, Escape clears, Enter opens the
+# first match, arrows walk rows). All user-controlled text goes through
+# textContent so it is never parsed as HTML.
 INDEX_JS = r"""
 (function () {
   var listEl = document.getElementById('session-list');
   var searchEl = document.getElementById('index-search');
   var statusEl = document.getElementById('index-status');
   var countEl = document.getElementById('index-count');
+  var emptyEl = document.getElementById('watch-empty');
+  if (!listEl || !searchEl) return;
   var sessions = [];
 
   function fmtAge(mtime) {
@@ -2556,7 +2571,7 @@ INDEX_JS = r"""
   function setStatus(ok, text) {
     if (!statusEl) return;
     statusEl.textContent = text;
-    statusEl.className = 'live-status ' + (ok ? 'live' : 'down');
+    statusEl.className = 'watch-status ' + (ok ? 'live' : 'down');
   }
   function rowMatches(s, q) {
     if (!q) return true;
@@ -2570,6 +2585,65 @@ INDEX_JS = r"""
       .then(function () { setTimeout(refresh, 600); });
   }
 
+  function buildItem(s, i) {
+    var item = document.createElement('div');
+    item.className = 'ledger-item';
+
+    var a = document.createElement('a');
+    a.className = 'ledger-row';
+    a.href = s.url;
+    a.target = '_blank'; // keep the index open; each session gets a tab
+    a.rel = 'noopener';
+    a.style.setProperty('--i', Math.min(i, 15)); // capped stagger, as archive
+
+    var main = document.createElement('div');
+    main.className = 'ledger-row-main';
+    var name = document.createElement('span');
+    name.className = 'ledger-name';
+    name.textContent = s.title || '(untitled)';
+    main.appendChild(name);
+    if (s.summary && s.summary !== s.title) {
+      var sub = document.createElement('span');
+      sub.className = 'ledger-sub';
+      sub.textContent = s.summary;
+      main.appendChild(sub);
+    }
+    var meta = document.createElement('span');
+    meta.className = 'ledger-meta';
+    meta.textContent = [s.project, s.branch && '[' + s.branch + ']', s.command]
+      .filter(Boolean).join('  ·  ');
+    main.appendChild(meta);
+    a.appendChild(main);
+
+    var right = document.createElement('div');
+    right.className = 'watch-right';
+    var when = document.createElement('span');
+    when.className = 'watch-when';
+    var active = (Date.now() / 1000 - s.mtime) < 300;
+    when.textContent = (active ? '● active · ' : '') +
+      fmtAge(s.mtime) + ' · ' + Math.round(s.size / 1024) + ' KB';
+    if (active) when.classList.add('watch-active');
+    right.appendChild(when);
+    if (s.watchers > 0) {
+      var badge = document.createElement('span');
+      badge.className = 'watch-badge';
+      badge.textContent = '● watching' + (s.watchers > 1 ? ' ×' + s.watchers : '');
+      right.appendChild(badge);
+    }
+    a.appendChild(right);
+    item.appendChild(a);
+
+    if (s.watchers > 0) {
+      var btn = document.createElement('button');
+      btn.className = 'watch-close';
+      btn.textContent = '✕ close';
+      btn.title = 'Stop streaming this session in every open tab';
+      btn.addEventListener('click', function () { closeSession(s.id); });
+      item.appendChild(btn);
+    }
+    return item;
+  }
+
   function render() {
     if (!listEl) return;
     var q = ((searchEl && searchEl.value) || '').trim().toLowerCase();
@@ -2577,78 +2651,66 @@ INDEX_JS = r"""
     var shown = 0;
     sessions.forEach(function (s) {
       if (!rowMatches(s, q)) return;
+      listEl.appendChild(buildItem(s, shown));
       shown += 1;
-      var item = document.createElement('div');
-      item.className = 'index-item';
-
-      var a = document.createElement('a');
-      a.href = s.url;
-      a.target = '_blank'; // keep the index open; each session gets a tab
-      a.rel = 'noopener';
-
-      var header = document.createElement('div');
-      header.className = 'index-item-header';
-      var titleEl = document.createElement('span');
-      titleEl.className = 'index-item-number';
-      titleEl.textContent = s.title || '(untitled)';
-      var when = document.createElement('span');
-      when.className = 'watch-when';
-      var active = (Date.now() / 1000 - s.mtime) < 300;
-      when.textContent = (active ? '● active · ' : '') +
-        fmtAge(s.mtime) + ' · ' + Math.round(s.size / 1024) + ' KB';
-      if (active) when.classList.add('watch-active');
-      header.appendChild(titleEl);
-      header.appendChild(when);
-
-      var content = document.createElement('div');
-      content.className = 'index-item-content';
-      if (s.summary && s.summary !== s.title) {
-        var sum = document.createElement('div');
-        sum.className = 'watch-summary';
-        sum.textContent = s.summary;
-        content.appendChild(sum);
-      }
-      var meta = document.createElement('div');
-      meta.className = 'watch-meta';
-      meta.textContent = [s.project, s.branch && '[' + s.branch + ']', s.command]
-        .filter(Boolean).join(' · ');
-      content.appendChild(meta);
-
-      a.appendChild(header);
-      a.appendChild(content);
-      item.appendChild(a);
-
-      if (s.watchers > 0) {
-        var actions = document.createElement('div');
-        actions.className = 'watch-actions';
-        var badge = document.createElement('span');
-        badge.className = 'watch-badge';
-        badge.textContent = '● watching' + (s.watchers > 1 ? ' ×' + s.watchers : '');
-        var btn = document.createElement('button');
-        btn.className = 'watch-close-btn';
-        btn.textContent = '✕ close';
-        btn.title = 'Stop streaming this session in every open tab';
-        btn.addEventListener('click', function () { closeSession(s.id); });
-        actions.appendChild(badge);
-        actions.appendChild(btn);
-        item.appendChild(actions);
-      }
-      listEl.appendChild(item);
     });
-    if (!shown) {
-      var empty = document.createElement('p');
-      empty.className = 'watch-empty';
-      empty.textContent = sessions.length
-        ? 'No sessions match the search.'
+    if (emptyEl) {
+      emptyEl.textContent = sessions.length
+        ? 'No matches.'
         : 'No sessions yet — start a Claude Code conversation and it will appear here.';
-      listEl.appendChild(empty);
+      emptyEl.hidden = shown > 0;
     }
     if (countEl) {
-      countEl.textContent = q
-        ? shown + ' of ' + sessions.length + ' sessions'
-        : sessions.length + ' sessions';
+      countEl.textContent = ' · ' +
+        (q ? shown + ' of ' + sessions.length : String(sessions.length)) +
+        ' session' + (sessions.length === 1 ? '' : 's');
+    }
+    if (!listEl.dataset.painted) {
+      // Let the first paint's entry animation finish, then pin the list so
+      // routine re-renders (age ticks, new data) don't replay the stagger.
+      listEl.dataset.painted = '1';
+      setTimeout(function () { listEl.classList.add('settled'); }, 800);
     }
   }
+
+  function visibleRows() {
+    return Array.prototype.slice.call(listEl.querySelectorAll('.ledger-row'));
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === '/' && document.activeElement !== searchEl &&
+        !/INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || '')) {
+      e.preventDefault();
+      searchEl.focus();
+      searchEl.select();
+      return;
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    var cur = document.activeElement;
+    if (!cur || !cur.classList || !cur.classList.contains('ledger-row')) return;
+    e.preventDefault();
+    var vis = visibleRows();
+    var i = vis.indexOf(cur);
+    var next = e.key === 'ArrowDown' ? vis[i + 1] : (i === 0 ? searchEl : vis[i - 1]);
+    if (next && next.focus) next.focus();
+  });
+
+  searchEl.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+      searchEl.value = '';
+      render();
+      searchEl.blur();
+    } else if (e.key === 'Enter' || e.key === 'ArrowDown') {
+      // Enter without a query would open the first row — too easy to hit
+      // reflexively right after '/' focuses the box.
+      if (e.key === 'Enter' && !searchEl.value.trim()) return;
+      e.preventDefault();
+      var first = visibleRows()[0];
+      if (!first) return;
+      if (e.key === 'Enter') first.click();
+      else first.focus();
+    }
+  });
 
   // Re-render only when the data changed (or on the slow tick, so the age
   // labels stay roughly current): an unconditional 3s repaint would tear
@@ -3083,6 +3145,21 @@ class _LiveHandler(BaseHTTPRequestHandler):
                 self.send_error(404)
             else:
                 self._serve_sessions_json()
+        elif path == "/api/watch-info":
+            # Identity probe for relaunch detection: lets a later `watch`
+            # invocation confirm the port is OUR watch server for THIS folder
+            # (not an unrelated local service that happened to reuse it).
+            if server.projects_folder is None:
+                self.send_error(404)
+            else:
+                self._send_json(
+                    {
+                        "app": "claude-code-transcripts",
+                        "mode": "watch",
+                        "pid": os.getpid(),
+                        "source": str(server.projects_folder),
+                    }
+                )
         else:
             m = _SESSION_PATH_RE.match(path)
             # unquote: ids are raw file stems, but the URL arrives encoded
@@ -3107,11 +3184,41 @@ class _LiveHandler(BaseHTTPRequestHandler):
             self.send_error(403)
             return
         path = self.path.split("?", 1)[0]
+        if path == "/api/sessions/open":
+            self._open_session_from_body()
+            return
+        if path == "/api/shutdown":
+            # Respond first, then stop the serve loop from another thread —
+            # shutdown() blocks until serve_forever exits, and this handler
+            # runs on its own thread so the call itself is deadlock-free.
+            self._send_json({"stopping": True})
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
         m = _CLOSE_PATH_RE.match(path)
         if m and self.server.close_session(unquote(m.group(1))):
             self._send_json({"closed": True})
         else:
             self.send_error(404)
+
+    def _open_session_from_body(self):
+        """Register the session file named in the JSON body; reply its URL.
+
+        Same trust level as the --session CLI flag: any local process can
+        already reach this server, and cross-site POSTs are blocked upstream
+        by the Origin check.
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            session_path = Path(payload["path"])
+        except (ValueError, KeyError, UnicodeDecodeError):
+            self.send_error(400)
+            return
+        if not session_path.is_file():
+            self.send_error(400)
+            return
+        sess = self.server.register_session(session_path)
+        self._send_json({"url": f"/session/{quote(sess.id)}/"})
 
     def _send_json(self, obj, status=200):
         body = json.dumps(obj).encode("utf-8")
@@ -3131,9 +3238,11 @@ class _LiveHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _serve_index(self):
+        # Same ledger stylesheet as the static archive indexes (`all`), plus
+        # the watch-only additions — the index pages read as one design.
         self._send_html(
             get_template("watch_index.html").render(
-                css=CSS + LIVE_CSS + INDEX_CSS, js=INDEX_JS
+                css=ARCHIVE_CSS + INDEX_CSS, js=INDEX_JS
             )
         )
 
@@ -3361,6 +3470,93 @@ def create_watch_server(
         poll_interval=poll_interval,
         projects_folder=projects_folder,
     )
+
+
+# ---------------------------------------------------------------------------
+# Watch daemon state: one JSON file per projects folder records the running
+# background server (pid/port/urls) so a relaunch can find it, open the
+# browser at it, and --stop can shut it down. Lives outside the projects
+# folder itself so nothing ever mistakes it for a session file.
+
+
+def _watch_state_dir():
+    """Directory for daemon state files; override with
+    CLAUDE_CODE_TRANSCRIPTS_STATE_DIR (used by tests, handy for users)."""
+    override = os.environ.get("CLAUDE_CODE_TRANSCRIPTS_STATE_DIR")
+    if override:
+        return Path(override)
+    return Path.home() / ".claude-code-transcripts"
+
+
+def _watch_state_key(projects_folder):
+    # resolve() so relative and absolute spellings of the same folder share
+    # one state file (and one running daemon).
+    resolved = str(Path(projects_folder).resolve())
+    return hashlib.sha1(resolved.encode("utf-8")).hexdigest()[:12]
+
+
+def _watch_state_path(projects_folder):
+    return _watch_state_dir() / f"watch-{_watch_state_key(projects_folder)}.json"
+
+
+def _watch_log_path(projects_folder):
+    """The daemon's stdout/stderr log — where startup crashes surface."""
+    return _watch_state_dir() / f"watch-{_watch_state_key(projects_folder)}.log"
+
+
+def _write_watch_state(projects_folder, pid, port, open_url, token=None):
+    path = _watch_state_path(projects_folder)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state = {
+        "pid": pid,
+        "port": port,
+        "index_url": f"http://127.0.0.1:{port}/",
+        "open_url": open_url,
+        "source": str(Path(projects_folder).resolve()),
+        "token": token,
+    }
+    path.write_text(json.dumps(state), encoding="utf-8")
+    return state
+
+
+def _read_watch_state(projects_folder):
+    """The recorded daemon state, or None when absent/corrupt. A corrupt
+    file reads as 'not running' — the launch path overwrites it anyway."""
+    try:
+        return json.loads(
+            _watch_state_path(projects_folder).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+
+
+def _clear_watch_state(projects_folder):
+    try:
+        _watch_state_path(projects_folder).unlink()
+    except OSError:
+        pass
+
+
+def _probe_watch_server(state, projects_folder, timeout=1.0):
+    """Index URL of a live, trusted watch server described by `state`, else
+    None. Trusted means /api/watch-info answers as this app AND names the
+    same projects folder — a stale port grabbed by some other local service
+    (or by a watch of a different folder) must not count as 'running'."""
+    port = (state or {}).get("port")
+    if not port:
+        return None
+    index_url = f"http://127.0.0.1:{port}/"
+    try:
+        info = httpx.get(f"{index_url}api/watch-info", timeout=timeout).json()
+    except Exception:
+        return None
+    if info.get("app") != "claude-code-transcripts":
+        return None
+    try:
+        same_source = Path(info["source"]).resolve() == Path(projects_folder).resolve()
+    except (KeyError, OSError):
+        return None
+    return index_url if same_source else None
 
 
 CSS = """
@@ -4622,6 +4818,171 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
         webbrowser.open(index_url)
 
 
+def _open_session_on(index_url, session_file):
+    """Register `session_file` on the running server at `index_url`; returns
+    the absolute live-view URL, or None if the server refused/vanished."""
+    try:
+        r = httpx.post(
+            f"{index_url}api/sessions/open",
+            json={"path": str(Path(session_file).resolve())},
+            timeout=5.0,
+        )
+        if r.status_code != 200:
+            return None
+        return index_url.rstrip("/") + r.json()["url"]
+    except Exception:
+        return None
+
+
+def _spawn_watch_daemon(projects_folder, source, port, repo, poll_interval, session):
+    """Start a detached `watch --foreground` child; returns (Popen, token).
+
+    The child binds its own port, writes the state file, and serves until
+    /api/shutdown (or a kill). Detachment: no console window on Windows, its
+    own session on POSIX — either way it survives this terminal closing.
+    stdout/stderr land in the per-source log so startup crashes are readable.
+
+    The launch token (random, passed through the child's environment and
+    echoed back in its state file) is how the parent recognizes THIS child's
+    state. Popen.pid can't do that job: Windows venv pythons are trampoline
+    executables, so the served process is the launcher's grandchild and
+    os.getpid() there never equals Popen.pid.
+    """
+    token = os.urandom(16).hex()
+    cmd = [
+        sys.executable,
+        "-m",
+        "claude_code_transcripts",
+        "watch",
+        "--foreground",
+        "--no-open",
+        "--port",
+        str(port),
+        "--poll-interval",
+        str(poll_interval),
+    ]
+    if source:
+        # Resolved so the child lands on the same state file even though the
+        # user's spelling was relative. Only forwarded when the user gave
+        # --source: the default folder may not exist yet, and an explicit
+        # --source of a missing folder is (deliberately) an error.
+        cmd += ["--source", str(Path(projects_folder).resolve())]
+    if repo:
+        cmd += ["--repo", repo]
+    if session is not None:
+        cmd += ["--session", str(Path(session).resolve())]
+    log_path = _watch_log_path(projects_folder)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        kwargs = {
+            "creationflags": subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+        }
+    else:
+        kwargs = {"start_new_session": True}
+    env = {**os.environ, "CLAUDE_CODE_TRANSCRIPTS_LAUNCH_TOKEN": token}
+    with open(log_path, "w", encoding="utf-8") as log:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env, **kwargs
+        )
+    return proc, token
+
+
+def _wait_for_watch_child(projects_folder, proc, token, timeout=15.0):
+    """State written by the spawned child once it serves and answers its
+    identity probe; None if the child died or never became healthy. The
+    launch-token match ensures we adopt the CHILD's state, not a stale file."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return None
+        state = _read_watch_state(projects_folder)
+        if (
+            state
+            and state.get("token") == token
+            and _probe_watch_server(state, projects_folder, timeout=0.5)
+        ):
+            return state
+        time.sleep(0.15)
+    return None
+
+
+def _echo_log_tail(log_path, lines=15):
+    try:
+        tail = (
+            log_path.read_text(encoding="utf-8", errors="replace")
+            .strip()
+            .splitlines()[-lines:]
+        )
+    except OSError:
+        return
+    for line in tail:
+        click.echo(f"  {line}")
+
+
+def _stop_watch_daemon(projects_folder):
+    """Stop the recorded watch server for this folder (if it really is one)."""
+    state = _read_watch_state(projects_folder)
+    index_url = _probe_watch_server(state, projects_folder)
+    if index_url is None:
+        _clear_watch_state(projects_folder)  # sweep any stale record
+        click.echo(f"No watch server running for {Path(projects_folder).resolve()}")
+        return
+    try:
+        httpx.post(f"{index_url}api/shutdown", timeout=5.0)
+    except Exception:
+        pass  # the connection may drop as the server exits — that IS success
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if _probe_watch_server(state, projects_folder, timeout=0.5) is None:
+            break
+        time.sleep(0.1)
+    # The child clears its own state on the way out; this covers hard deaths.
+    _clear_watch_state(projects_folder)
+    click.echo(f"Stopped watch server at {index_url}")
+
+
+def _run_watch_foreground(
+    projects_folder, session_file, port, repo, poll_interval, open_browser
+):
+    """Serve the watch index in this process until Ctrl-C or /api/shutdown.
+    Registers the daemon state file while serving so relaunches (and --stop)
+    can find this server, and clears it on the way out."""
+    server = create_watch_server(
+        projects_folder, port=port, repo=repo, poll_interval=poll_interval
+    )
+    index_url = f"http://127.0.0.1:{server.server_address[1]}/"
+    open_url = index_url
+    if session_file is not None:
+        sess = server.register_session(Path(session_file))
+        open_url = f"{index_url}session/{quote(sess.id)}/"
+        click.echo(f"Watching {session_file}")
+        click.echo(f"Live at {open_url}")
+    click.echo(f"Session index at {index_url}  (press Ctrl-C to stop)")
+    _write_watch_state(
+        projects_folder,
+        pid=os.getpid(),
+        port=server.server_address[1],
+        open_url=open_url,
+        # Set when a backgrounding parent spawned us — echoing it back is how
+        # that parent recognizes this state file as ours (see _spawn_watch_daemon).
+        token=os.environ.get("CLAUDE_CODE_TRANSCRIPTS_LAUNCH_TOKEN"),
+    )
+    if open_browser:
+        webbrowser.open(open_url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        click.echo("\nStopping…")
+    finally:
+        server.stop_event.set()
+        server.server_close()
+        # Only remove a record that is still ours — never a successor's.
+        state = _read_watch_state(projects_folder)
+        if state is None or state.get("pid") == os.getpid():
+            _clear_watch_state(projects_folder)
+
+
 @cli.command("watch")
 @click.option(
     "--session",
@@ -4664,19 +5025,51 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
     default=0.3,
     help="Seconds between file polls (default: 0.3).",
 )
-def watch_cmd(session, pick, limit, source, port, repo, open_browser, poll_interval):
+@click.option(
+    "--foreground",
+    is_flag=True,
+    help="Serve in this terminal (Ctrl-C to stop) instead of the background.",
+)
+@click.option(
+    "--stop",
+    "stop_server",
+    is_flag=True,
+    help="Stop the background watch server for this projects folder.",
+)
+def watch_cmd(
+    session,
+    pick,
+    limit,
+    source,
+    port,
+    repo,
+    open_browser,
+    poll_interval,
+    foreground,
+    stop_server,
+):
     """Watch Claude Code sessions live in your browser.
 
-    Serves a searchable index of your sessions at `/` — pick sessions there
-    to watch any number of them live, each in its own tab, and close active
-    watches from the index. --session and --pick jump straight into one
-    session's live view (the index stays available at `/`).
+    Starts a background server, opens your browser at the searchable session
+    index at `/`, and returns the terminal to you. Pick sessions on the index
+    to watch any number of them live, each in its own tab. Re-running while
+    the server is up just re-opens the browser; stop it with --stop, or use
+    --foreground to serve in this terminal instead.
+
+    --session and --pick jump straight into one session's live view (the
+    index stays available at `/`).
     """
+    if foreground and stop_server:
+        raise click.UsageError("--stop and --foreground are mutually exclusive.")
     projects_folder = Path(source) if source else (Path.home() / ".claude" / "projects")
     if source and not projects_folder.exists():
         # A typo'd --source would otherwise serve a permanently empty index.
         # (The DEFAULT folder may legitimately not exist yet — serve anyway.)
         click.echo(f"Source directory not found: {projects_folder}")
+        return
+
+    if stop_server:
+        _stop_watch_daemon(projects_folder)
         return
 
     session_file = None
@@ -4698,26 +5091,46 @@ def watch_cmd(session, pick, limit, source, port, repo, open_browser, poll_inter
             click.echo(f"Session file not found: {session_file}")
             return
 
-    server = create_watch_server(
-        projects_folder, port=port, repo=repo, poll_interval=poll_interval
+    # Relaunch while a healthy server for this folder is up: no second
+    # server — just point the browser at it (registering the requested
+    # session there first, when one was asked for).
+    existing = _probe_watch_server(_read_watch_state(projects_folder), projects_folder)
+    if existing:
+        open_url = existing
+        if session_file is not None:
+            open_url = _open_session_on(existing, session_file) or existing
+            click.echo(f"Live at {open_url}")
+        click.echo(f"Watch server already running at {existing}")
+        if open_browser:
+            webbrowser.open(open_url)
+        return
+
+    if foreground:
+        _run_watch_foreground(
+            projects_folder, session_file, port, repo, poll_interval, open_browser
+        )
+        return
+
+    # Background default: detach a --foreground child, wait until it writes
+    # its state file and answers the identity probe, then hand the terminal
+    # back with the browser pointed at it.
+    proc, token = _spawn_watch_daemon(
+        projects_folder, source, port, repo, poll_interval, session_file
     )
-    index_url = f"http://127.0.0.1:{server.server_address[1]}/"
-    open_url = index_url
+    state = _wait_for_watch_child(projects_folder, proc, token)
+    if state is None:
+        log_path = _watch_log_path(projects_folder)
+        _echo_log_tail(log_path)
+        raise click.ClickException(f"Watch server failed to start — see {log_path}")
     if session_file is not None:
-        sess = server.register_session(Path(session_file))
-        open_url = f"{index_url}session/{quote(sess.id)}/"
         click.echo(f"Watching {session_file}")
-        click.echo(f"Live at {open_url}")
-    click.echo(f"Session index at {index_url}  (press Ctrl-C to stop)")
+        click.echo(f"Live at {state['open_url']}")
+    click.echo(
+        f"Session index at {state['index_url']}  "
+        "(background — stop with: claude-code-transcripts watch --stop)"
+    )
     if open_browser:
-        webbrowser.open(open_url)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        click.echo("\nStopping…")
-    finally:
-        server.stop_event.set()
-        server.server_close()
+        webbrowser.open(state["open_url"])
 
 
 def is_url(path):

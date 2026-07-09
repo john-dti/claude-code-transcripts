@@ -1526,8 +1526,10 @@ class TestLiveServer:
 
 
 class TestWatchCommand:
-    """CLI wiring for `watch`. The blocking serve loop is stubbed so the runner
-    doesn't hang; the tail loop itself is covered by TestLiveServer."""
+    """CLI wiring for `watch --foreground` (the serving path — background
+    orchestration is covered in test_watch_daemon.py). The blocking serve
+    loop is stubbed so the runner doesn't hang; the tail loop itself is
+    covered by TestLiveServer."""
 
     def test_help_lists_options(self):
         result = CliRunner().invoke(cli, ["watch", "--help"])
@@ -1536,17 +1538,19 @@ class TestWatchCommand:
         assert "--pick" in result.output
         assert "--no-open" in result.output
 
-    def test_bare_watch_serves_session_index(
+    def test_foreground_watch_serves_session_index(
         self, tmp_path, monkeypatch, mock_webbrowser_open
     ):
-        # The default is the searchable web index — sessions are picked there,
-        # not auto-resolved to the newest file.
+        # The landing page is the searchable web index — sessions are picked
+        # there, not auto-resolved to the newest file.
         _write_session(tmp_path / "p" / "live.jsonl", _user_line("hello"), 2000)
         monkeypatch.setattr(
             "claude_code_transcripts._LiveServer.serve_forever", lambda self: None
         )
 
-        result = CliRunner().invoke(cli, ["watch", "--source", str(tmp_path)])
+        result = CliRunner().invoke(
+            cli, ["watch", "--foreground", "--source", str(tmp_path)]
+        )
 
         assert result.exit_code == 0, result.output
         assert "Session index at" in result.output
@@ -1559,7 +1563,9 @@ class TestWatchCommand:
         monkeypatch.setattr(
             "claude_code_transcripts._LiveServer.serve_forever", lambda self: None
         )
-        result = CliRunner().invoke(cli, ["watch", "--source", str(tmp_path)])
+        result = CliRunner().invoke(
+            cli, ["watch", "--foreground", "--source", str(tmp_path)]
+        )
         assert result.exit_code == 0, result.output
         assert "Session index at" in result.output
 
@@ -1587,7 +1593,8 @@ class TestWatchCommand:
         )
 
         result = CliRunner().invoke(
-            cli, ["watch", "--source", str(tmp_path), "--session", str(p)]
+            cli,
+            ["watch", "--foreground", "--source", str(tmp_path), "--session", str(p)],
         )
 
         assert result.exit_code == 0, result.output
@@ -1617,7 +1624,7 @@ class TestWatchCommand:
         )
 
         result = CliRunner().invoke(
-            cli, ["watch", "--source", str(tmp_path), "--no-open"]
+            cli, ["watch", "--foreground", "--source", str(tmp_path), "--no-open"]
         )
 
         assert result.exit_code == 0, result.output
@@ -1642,7 +1649,9 @@ class TestWatchCommand:
             "claude_code_transcripts._LiveServer.serve_forever", lambda self: None
         )
 
-        result = CliRunner().invoke(cli, ["watch", "--pick", "--source", str(tmp_path)])
+        result = CliRunner().invoke(
+            cli, ["watch", "--foreground", "--pick", "--source", str(tmp_path)]
+        )
 
         assert result.exit_code == 0, result.output
         assert "chosen.jsonl" in result.output  # picked, not the newer one
@@ -1695,7 +1704,9 @@ class TestWatchCommand:
             "claude_code_transcripts._LiveServer.serve_forever", lambda self: None
         )
 
-        result = CliRunner().invoke(cli, ["watch", "--pick", "--source", str(tmp_path)])
+        result = CliRunner().invoke(
+            cli, ["watch", "--foreground", "--pick", "--source", str(tmp_path)]
+        )
 
         assert result.exit_code == 0, result.output
         row = captured["choices"][0].title
@@ -1727,7 +1738,16 @@ class TestWatchCommand:
         )
 
         result = CliRunner().invoke(
-            cli, ["watch", "--pick", "--limit", "2", "--source", str(tmp_path)]
+            cli,
+            [
+                "watch",
+                "--foreground",
+                "--pick",
+                "--limit",
+                "2",
+                "--source",
+                str(tmp_path),
+            ],
         )
 
         assert result.exit_code == 0, result.output

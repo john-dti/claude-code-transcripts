@@ -3,13 +3,15 @@
 {% block title %}Claude Code sessions (live){% endblock %}
 
 {% block content %}
-        <div class="live-header">
-            <h1>Claude Code sessions</h1>
-            <span id="index-status" class="live-status down">● connecting…</span>
+        <header class="ledger-head">
+            <p class="ledger-kicker">CLAUDE CODE</p>
+            <h1 class="ledger-title">Live Sessions</h1>
+            <p class="ledger-stats"><span id="index-status" class="watch-status down">● connecting…</span><span id="index-count"></span></p>
+        </header>
+        <div class="ledger-search">
+            <input type="search" id="index-search" placeholder="Search title, summary, project, branch…" autocomplete="off" aria-label="Search sessions">
+            <kbd title="Press / to search">/</kbd>
         </div>
-        <div class="watch-search">
-            <input type="search" id="index-search" placeholder="Search title, summary, project, branch…" autocomplete="off">
-        </div>
-        <p id="index-count" class="stats-bar"></p>
-        <div id="session-list"></div>
+        <section id="session-list"></section>
+        <p id="watch-empty" class="ledger-empty" hidden></p>
 {%- endblock %}
