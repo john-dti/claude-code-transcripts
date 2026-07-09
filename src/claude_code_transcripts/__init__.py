@@ -3083,6 +3083,21 @@ class _LiveHandler(BaseHTTPRequestHandler):
                 self.send_error(404)
             else:
                 self._serve_sessions_json()
+        elif path == "/api/watch-info":
+            # Identity probe for relaunch detection: lets a later `watch`
+            # invocation confirm the port is OUR watch server for THIS folder
+            # (not an unrelated local service that happened to reuse it).
+            if server.projects_folder is None:
+                self.send_error(404)
+            else:
+                self._send_json(
+                    {
+                        "app": "claude-code-transcripts",
+                        "mode": "watch",
+                        "pid": os.getpid(),
+                        "source": str(server.projects_folder),
+                    }
+                )
         else:
             m = _SESSION_PATH_RE.match(path)
             # unquote: ids are raw file stems, but the URL arrives encoded
@@ -3107,11 +3122,41 @@ class _LiveHandler(BaseHTTPRequestHandler):
             self.send_error(403)
             return
         path = self.path.split("?", 1)[0]
+        if path == "/api/sessions/open":
+            self._open_session_from_body()
+            return
+        if path == "/api/shutdown":
+            # Respond first, then stop the serve loop from another thread —
+            # shutdown() blocks until serve_forever exits, and this handler
+            # runs on its own thread so the call itself is deadlock-free.
+            self._send_json({"stopping": True})
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
         m = _CLOSE_PATH_RE.match(path)
         if m and self.server.close_session(unquote(m.group(1))):
             self._send_json({"closed": True})
         else:
             self.send_error(404)
+
+    def _open_session_from_body(self):
+        """Register the session file named in the JSON body; reply its URL.
+
+        Same trust level as the --session CLI flag: any local process can
+        already reach this server, and cross-site POSTs are blocked upstream
+        by the Origin check.
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            session_path = Path(payload["path"])
+        except (ValueError, KeyError, UnicodeDecodeError):
+            self.send_error(400)
+            return
+        if not session_path.is_file():
+            self.send_error(400)
+            return
+        sess = self.server.register_session(session_path)
+        self._send_json({"url": f"/session/{quote(sess.id)}/"})
 
     def _send_json(self, obj, status=200):
         body = json.dumps(obj).encode("utf-8")
