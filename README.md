@@ -110,7 +110,7 @@ claude-code-transcripts watch
 claude-code-transcripts watch --stop
 ```
 
-The index at `/` lists every session under `~/.claude/projects`, newest first, with a search box that filters by title, summary, project, branch, and slash command as you type. It refreshes itself every few seconds, so new sessions appear as they start and recently-active ones carry an `● active` marker. Click a session to watch it live in a new tab — open as many as you like; each tab streams independently. Sessions with live watchers show an `● watching` badge and a `✕ close` button that stops their streams (the watching tabs say `● closed` and stop reconnecting; re-open from the index any time).
+The index at `/` lists every session under `~/.claude/projects`, newest first, in the same engineering-ledger design as the [`all` archive](#converting-all-sessions) — with the same search affordances: `/` focuses the search box, `Escape` clears it, `Enter` opens the first match, and the arrow keys walk the rows. The search filters by title, summary, project, branch, and slash command as you type. The index refreshes itself every few seconds, so new sessions appear as they start and recently-active ones carry an `● active` marker. Click a session to watch it live in a new tab — open as many as you like; each tab streams independently. Sessions with live watchers show an `● watching` badge and a `✕ close` button that stops their streams (the watching tabs say `● closed` and stop reconnecting; re-open from the index any time).
 
 To jump straight into one session's live view (the index stays available at `/`):
 

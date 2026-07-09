@@ -2521,31 +2521,44 @@ LIVE_JS = r"""
 })();
 """
 
-# Styles for the watch index page only (appended to CSS + LIVE_CSS, which
-# already provide .index-item and the live-status states).
+# Watch-index additions on top of ARCHIVE_CSS (the shared engineering-ledger
+# stylesheet): the live status chip, the age/watching column, and the close
+# rail. Rows are wrapped in .ledger-item so the close button can be a real
+# <button> beside the row's <a> (buttons can't nest inside anchors).
 INDEX_CSS = """
-.watch-search { margin: 0 0 12px; }
-.watch-search input { width: 100%; padding: 10px 14px; font-size: 1rem; border: 1px solid #ccc; border-radius: 8px; background: var(--card-bg); color: var(--text-color); }
-.watch-when { color: var(--text-muted); font-size: 0.85rem; white-space: nowrap; }
-.watch-active { color: #2e7d32; }
-.watch-summary { margin-bottom: 4px; }
-.watch-meta { color: var(--text-muted); font-size: 0.85rem; }
-.watch-actions { display: flex; align-items: center; gap: 10px; padding: 6px 16px; border-top: 1px solid rgba(0,0,0,0.06); }
-.watch-badge { color: #2e7d32; font-size: 0.85rem; font-weight: 600; }
-.watch-close-btn { background: transparent; border: 1px solid #ef9a9a; color: #b71c1c; border-radius: 6px; padding: 2px 10px; cursor: pointer; font-size: 0.85rem; }
-.watch-close-btn:hover { background: #ffebee; }
-.watch-empty { color: var(--text-muted); padding: 24px 0; text-align: center; }
+.ledger-stats .watch-status { font-weight: 600; }
+.watch-status.live { color: #1e6b34; }
+.watch-status.down { color: var(--ink-soft); }
+.ledger-item { display: flex; align-items: stretch; border-bottom: 1px solid var(--rule); }
+.ledger-item .ledger-row { flex: 1; min-width: 0; border-bottom: none; }
+.watch-right { display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 4px; flex: none; }
+.watch-when { font: 400 0.73rem/1.4 var(--mono); color: var(--ink-soft); white-space: nowrap; }
+.watch-when.watch-active { color: #1e6b34; }
+.watch-badge { font: 600 0.7rem/1.4 var(--mono); color: #1e6b34; white-space: nowrap; }
+.watch-close {
+  flex: none; border: none; border-left: 1px solid var(--rule); background: transparent;
+  color: var(--ink-soft); font: 500 0.75rem var(--mono); padding: 0 14px; cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.watch-close:hover, .watch-close:focus-visible { background: #f7e8e6; color: #a13c2f; outline: none; }
+/* Entry animation only on the first paint: the list re-renders every few
+   seconds while sessions are active, and replaying the stagger would strobe. */
+#session-list.settled .ledger-row { animation: none; }
 """
 
-# The watch index client: polls api/sessions, renders searchable rows, opens
-# sessions in new tabs, and closes active watches. All user-controlled text
-# goes through textContent so it is never parsed as HTML.
+# The watch index client: polls api/sessions, renders searchable ledger rows,
+# opens sessions in new tabs, and closes active watches. Search + keyboard
+# affordances mirror ARCHIVE_JS (/ to focus, Escape clears, Enter opens the
+# first match, arrows walk rows). All user-controlled text goes through
+# textContent so it is never parsed as HTML.
 INDEX_JS = r"""
 (function () {
   var listEl = document.getElementById('session-list');
   var searchEl = document.getElementById('index-search');
   var statusEl = document.getElementById('index-status');
   var countEl = document.getElementById('index-count');
+  var emptyEl = document.getElementById('watch-empty');
+  if (!listEl || !searchEl) return;
   var sessions = [];
 
   function fmtAge(mtime) {
@@ -2558,7 +2571,7 @@ INDEX_JS = r"""
   function setStatus(ok, text) {
     if (!statusEl) return;
     statusEl.textContent = text;
-    statusEl.className = 'live-status ' + (ok ? 'live' : 'down');
+    statusEl.className = 'watch-status ' + (ok ? 'live' : 'down');
   }
   function rowMatches(s, q) {
     if (!q) return true;
@@ -2572,6 +2585,65 @@ INDEX_JS = r"""
       .then(function () { setTimeout(refresh, 600); });
   }
 
+  function buildItem(s, i) {
+    var item = document.createElement('div');
+    item.className = 'ledger-item';
+
+    var a = document.createElement('a');
+    a.className = 'ledger-row';
+    a.href = s.url;
+    a.target = '_blank'; // keep the index open; each session gets a tab
+    a.rel = 'noopener';
+    a.style.setProperty('--i', Math.min(i, 15)); // capped stagger, as archive
+
+    var main = document.createElement('div');
+    main.className = 'ledger-row-main';
+    var name = document.createElement('span');
+    name.className = 'ledger-name';
+    name.textContent = s.title || '(untitled)';
+    main.appendChild(name);
+    if (s.summary && s.summary !== s.title) {
+      var sub = document.createElement('span');
+      sub.className = 'ledger-sub';
+      sub.textContent = s.summary;
+      main.appendChild(sub);
+    }
+    var meta = document.createElement('span');
+    meta.className = 'ledger-meta';
+    meta.textContent = [s.project, s.branch && '[' + s.branch + ']', s.command]
+      .filter(Boolean).join('  ·  ');
+    main.appendChild(meta);
+    a.appendChild(main);
+
+    var right = document.createElement('div');
+    right.className = 'watch-right';
+    var when = document.createElement('span');
+    when.className = 'watch-when';
+    var active = (Date.now() / 1000 - s.mtime) < 300;
+    when.textContent = (active ? '● active · ' : '') +
+      fmtAge(s.mtime) + ' · ' + Math.round(s.size / 1024) + ' KB';
+    if (active) when.classList.add('watch-active');
+    right.appendChild(when);
+    if (s.watchers > 0) {
+      var badge = document.createElement('span');
+      badge.className = 'watch-badge';
+      badge.textContent = '● watching' + (s.watchers > 1 ? ' ×' + s.watchers : '');
+      right.appendChild(badge);
+    }
+    a.appendChild(right);
+    item.appendChild(a);
+
+    if (s.watchers > 0) {
+      var btn = document.createElement('button');
+      btn.className = 'watch-close';
+      btn.textContent = '✕ close';
+      btn.title = 'Stop streaming this session in every open tab';
+      btn.addEventListener('click', function () { closeSession(s.id); });
+      item.appendChild(btn);
+    }
+    return item;
+  }
+
   function render() {
     if (!listEl) return;
     var q = ((searchEl && searchEl.value) || '').trim().toLowerCase();
@@ -2579,78 +2651,66 @@ INDEX_JS = r"""
     var shown = 0;
     sessions.forEach(function (s) {
       if (!rowMatches(s, q)) return;
+      listEl.appendChild(buildItem(s, shown));
       shown += 1;
-      var item = document.createElement('div');
-      item.className = 'index-item';
-
-      var a = document.createElement('a');
-      a.href = s.url;
-      a.target = '_blank'; // keep the index open; each session gets a tab
-      a.rel = 'noopener';
-
-      var header = document.createElement('div');
-      header.className = 'index-item-header';
-      var titleEl = document.createElement('span');
-      titleEl.className = 'index-item-number';
-      titleEl.textContent = s.title || '(untitled)';
-      var when = document.createElement('span');
-      when.className = 'watch-when';
-      var active = (Date.now() / 1000 - s.mtime) < 300;
-      when.textContent = (active ? '● active · ' : '') +
-        fmtAge(s.mtime) + ' · ' + Math.round(s.size / 1024) + ' KB';
-      if (active) when.classList.add('watch-active');
-      header.appendChild(titleEl);
-      header.appendChild(when);
-
-      var content = document.createElement('div');
-      content.className = 'index-item-content';
-      if (s.summary && s.summary !== s.title) {
-        var sum = document.createElement('div');
-        sum.className = 'watch-summary';
-        sum.textContent = s.summary;
-        content.appendChild(sum);
-      }
-      var meta = document.createElement('div');
-      meta.className = 'watch-meta';
-      meta.textContent = [s.project, s.branch && '[' + s.branch + ']', s.command]
-        .filter(Boolean).join(' · ');
-      content.appendChild(meta);
-
-      a.appendChild(header);
-      a.appendChild(content);
-      item.appendChild(a);
-
-      if (s.watchers > 0) {
-        var actions = document.createElement('div');
-        actions.className = 'watch-actions';
-        var badge = document.createElement('span');
-        badge.className = 'watch-badge';
-        badge.textContent = '● watching' + (s.watchers > 1 ? ' ×' + s.watchers : '');
-        var btn = document.createElement('button');
-        btn.className = 'watch-close-btn';
-        btn.textContent = '✕ close';
-        btn.title = 'Stop streaming this session in every open tab';
-        btn.addEventListener('click', function () { closeSession(s.id); });
-        actions.appendChild(badge);
-        actions.appendChild(btn);
-        item.appendChild(actions);
-      }
-      listEl.appendChild(item);
     });
-    if (!shown) {
-      var empty = document.createElement('p');
-      empty.className = 'watch-empty';
-      empty.textContent = sessions.length
-        ? 'No sessions match the search.'
+    if (emptyEl) {
+      emptyEl.textContent = sessions.length
+        ? 'No matches.'
         : 'No sessions yet — start a Claude Code conversation and it will appear here.';
-      listEl.appendChild(empty);
+      emptyEl.hidden = shown > 0;
     }
     if (countEl) {
-      countEl.textContent = q
-        ? shown + ' of ' + sessions.length + ' sessions'
-        : sessions.length + ' sessions';
+      countEl.textContent = ' · ' +
+        (q ? shown + ' of ' + sessions.length : String(sessions.length)) +
+        ' session' + (sessions.length === 1 ? '' : 's');
+    }
+    if (!listEl.dataset.painted) {
+      // Let the first paint's entry animation finish, then pin the list so
+      // routine re-renders (age ticks, new data) don't replay the stagger.
+      listEl.dataset.painted = '1';
+      setTimeout(function () { listEl.classList.add('settled'); }, 800);
     }
   }
+
+  function visibleRows() {
+    return Array.prototype.slice.call(listEl.querySelectorAll('.ledger-row'));
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === '/' && document.activeElement !== searchEl &&
+        !/INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || '')) {
+      e.preventDefault();
+      searchEl.focus();
+      searchEl.select();
+      return;
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    var cur = document.activeElement;
+    if (!cur || !cur.classList || !cur.classList.contains('ledger-row')) return;
+    e.preventDefault();
+    var vis = visibleRows();
+    var i = vis.indexOf(cur);
+    var next = e.key === 'ArrowDown' ? vis[i + 1] : (i === 0 ? searchEl : vis[i - 1]);
+    if (next && next.focus) next.focus();
+  });
+
+  searchEl.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+      searchEl.value = '';
+      render();
+      searchEl.blur();
+    } else if (e.key === 'Enter' || e.key === 'ArrowDown') {
+      // Enter without a query would open the first row — too easy to hit
+      // reflexively right after '/' focuses the box.
+      if (e.key === 'Enter' && !searchEl.value.trim()) return;
+      e.preventDefault();
+      var first = visibleRows()[0];
+      if (!first) return;
+      if (e.key === 'Enter') first.click();
+      else first.focus();
+    }
+  });
 
   // Re-render only when the data changed (or on the slow tick, so the age
   // labels stay roughly current): an unconditional 3s repaint would tear
@@ -3178,9 +3238,11 @@ class _LiveHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _serve_index(self):
+        # Same ledger stylesheet as the static archive indexes (`all`), plus
+        # the watch-only additions — the index pages read as one design.
         self._send_html(
             get_template("watch_index.html").render(
-                css=CSS + LIVE_CSS + INDEX_CSS, js=INDEX_JS
+                css=ARCHIVE_CSS + INDEX_CSS, js=INDEX_JS
             )
         )
 

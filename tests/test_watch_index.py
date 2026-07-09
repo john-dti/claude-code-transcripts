@@ -217,6 +217,51 @@ def _poll_until(fn, timeout=5.0):
     return fn()
 
 
+class TestWatchIndexLedger:
+    """The watch index wears the archive's engineering-ledger design and its
+    search affordances (styling/function parity with `all --open`)."""
+
+    def _index_html(self, tmp_path):
+        server, port, t = _start_watch_server(tmp_path)
+        try:
+            r = httpx.get(f"http://127.0.0.1:{port}/", timeout=5)
+            assert r.status_code == 200
+            return r.text
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join(timeout=5)
+
+    def test_index_uses_ledger_shell(self, tmp_path):
+        html = self._index_html(tmp_path)
+        assert 'class="ledger-head"' in html
+        assert 'class="ledger-search"' in html
+        assert "<kbd" in html  # the visible / shortcut hint
+        assert ".ledger-row" in html  # ledger stylesheet is inlined
+        assert "IBM Plex" in html  # archive typography, not the old shell
+        assert 'class="live-header"' not in html  # old header fully replaced
+
+    def test_index_js_builds_ledger_rows_with_keyboard_nav(self):
+        # Rows are client-rendered; pin the JS to the ledger vocabulary and
+        # the archive's keyboard affordances (/ Escape Enter arrows).
+        assert "ledger-item" in cct.INDEX_JS
+        assert "ledger-row" in cct.INDEX_JS
+        assert "ledger-name" in cct.INDEX_JS
+        for key in ("'/'", "'Escape'", "'ArrowDown'", "'ArrowUp'", "'Enter'"):
+            assert key in cct.INDEX_JS, f"missing key handler for {key}"
+
+    def test_index_js_dom_ids_all_exist_in_template(self, tmp_path):
+        # Every getElementById target in INDEX_JS must exist on the page, or
+        # a renamed id silently kills search/status/empty-state handling.
+        import re as _re
+
+        html = self._index_html(tmp_path)
+        js_ids = set(_re.findall(r"getElementById\('([^']+)'\)", cct.INDEX_JS))
+        assert js_ids  # the JS really does look elements up
+        for el_id in js_ids:
+            assert f'id="{el_id}"' in html, f"template lost #{el_id}"
+
+
 class TestWatchServerRouting:
     """create_watch_server: index shell, sessions API, and per-session routes."""
 
